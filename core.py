@@ -1,10 +1,11 @@
+# core.py
 import time
 import threading
 from typing import Dict, List, Tuple
+import asyncio
 
 from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
 from config import QUEUE_CHECK_DELAY, TASK_COOLDOWN
 
 # ─────────────────────────────────────────────
@@ -19,11 +20,10 @@ ACTIVE_TASK = False
 LOG_GROUP_ID = None
 SESSION_GROUP_ID = None
 
-# Session: {"id": int, "active": bool, "client": Client}
-SESSIONS = []
+# Session dict: {"id": int, "active": bool, "client": Client}
+SESSIONS: List[Dict] = []
 
 LOCK = threading.Lock()
-
 
 # ─────────────────────────────────────────────
 # ACCESS MANAGEMENT
@@ -43,13 +43,11 @@ def get_access_info(user_id: int) -> str:
     remaining = int(USER_ACCESS[user_id] - time.time())
     hrs = remaining // 3600
     mins = (remaining % 3600) // 60
-
     return (
         "💼 **My Access**\n\n"
         f"Time remaining: **{hrs}h {mins}m**\n\n"
         "You can continue sending usernames 🌿"
     )
-
 
 # ─────────────────────────────────────────────
 # WAITING USERS MANAGEMENT
@@ -64,7 +62,6 @@ def is_waiting_for_username(user_id: int) -> bool:
 def clear_waiting(user_id: int):
     WAITING_USERS.discard(user_id)
 
-
 # ─────────────────────────────────────────────
 # QUEUE MANAGEMENT
 # ─────────────────────────────────────────────
@@ -74,7 +71,6 @@ def enqueue_request(user_id: int, username: str) -> int:
         clear_waiting(user_id)
         QUEUE.append((user_id, username))
         return len(QUEUE) - 1  # 0 = processing now
-
 
 # ─────────────────────────────────────────────
 # OWNER GROUP SETTERS
@@ -88,18 +84,16 @@ def set_session_group(chat_id: int):
     global SESSION_GROUP_ID
     SESSION_GROUP_ID = chat_id
 
-
 # ─────────────────────────────────────────────
 # PAYMENT STUB
 # ─────────────────────────────────────────────
 
 def create_payment_request(user_id: int, hours: int):
     """
-    Stub: manual approval flow
-    Owner manually approves -> grant_access(user_id, hours)
+    Manual approval flow
+    Owner approves -> call grant_access(user_id, hours)
     """
     pass
-
 
 # ─────────────────────────────────────────────
 # SESSION MANAGEMENT
@@ -111,11 +105,10 @@ def get_sessions_overview():
 
     rows = []
     for idx, sess in enumerate(SESSIONS):
-        status = "✅ ON" if sess["active"] else "❌ OFF"
+        status = "✅ ON" if sess.get("active") else "❌ OFF"
         rows.append([InlineKeyboardButton(f"Session {idx + 1} {status}", callback_data="noop")])
 
     return "🧠 **Sessions Overview**", InlineKeyboardMarkup(rows)
-
 
 # ─────────────────────────────────────────────
 # SYSTEM STATUS
@@ -132,16 +125,20 @@ def get_system_status() -> str:
         f"Session group set: {'Yes' if SESSION_GROUP_ID else 'No'}"
     )
 
-
 # ─────────────────────────────────────────────
 # BACKGROUND WORKER + MULTI-SESSION PRE-BAN
 # ─────────────────────────────────────────────
 
 def start_worker(app: Client):
+    """
+    Background thread: processes QUEUE, handles multi-session pre-ban.
+    """
     global ACTIVE_TASK
 
     def worker_loop():
         global ACTIVE_TASK
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
         while True:
             try:
@@ -152,26 +149,23 @@ def start_worker(app: Client):
                     user_id, username = QUEUE.pop(0)
                     ACTIVE_TASK = True
 
-                # ── PROCESSING START ──
                 start_time = time.time()
                 ban_success = 0
                 ban_failed = 0
 
-                # Iterate all active sessions
-                for sess in SESSIONS:
-                    if not sess.get("active") or not sess.get("client"):
-                        continue
-
-                    client: Client = sess["client"]
-
-                    try:
-                        async def preban():
+                async def process_user():
+                    nonlocal ban_success, ban_failed
+                    for sess in SESSIONS:
+                        if not sess.get("active") or not sess.get("client"):
+                            continue
+                        client: Client = sess["client"]
+                        try:
                             async for dialog in client.get_dialogs():
                                 chat = dialog.chat
-                                # Only supergroups or channels
                                 if chat.type not in ["supergroup", "channel"]:
                                     continue
-                                # Check admin rights
+
+                                # Check if client is admin
                                 try:
                                     me = await client.get_me()
                                     member = await client.get_chat_member(chat.id, me.id)
@@ -180,22 +174,22 @@ def start_worker(app: Client):
                                 except Exception:
                                     continue
 
-                                # Ban target user
+                                # Ban the target
                                 try:
                                     target = await client.get_users(username)
                                     await client.ban_chat_member(chat.id, target.id)
                                     ban_success += 1
                                 except Exception:
                                     ban_failed += 1
+                        except Exception:
+                            continue
 
-                        app.loop.run_until_complete(preban())
-
-                    except Exception:
-                        continue  # skip faulty session
+                # Run async pre-ban safely
+                loop.run_until_complete(process_user())
 
                 elapsed = round(time.time() - start_time, 2)
 
-                # Log group
+                # Log group notification
                 if LOG_GROUP_ID:
                     try:
                         app.send_message(
