@@ -1,15 +1,14 @@
 from pymongo import MongoClient
 from datetime import datetime, timedelta
+from bson import ObjectId
 
 from config import MONGO_URI, DB_NAME
-
 
 # ─────────────────────────────────────────────
 # DATABASE INIT
 # ─────────────────────────────────────────────
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
-
 
 # ─────────────────────────────────────────────
 # COLLECTIONS
@@ -19,7 +18,6 @@ payments = db.payments
 sessions = db.sessions
 settings = db.settings
 queue_logs = db.queue_logs
-
 
 # ─────────────────────────────────────────────
 # USER ACCESS
@@ -32,25 +30,21 @@ def grant_access(user_id: int, hours: int):
         upsert=True
     )
 
-
 def has_active_access(user_id: int) -> bool:
     user = users.find_one({"user_id": user_id})
-    if not user:
+    if not user or "expiry" not in user:
         return False
     return user["expiry"] > datetime.utcnow()
 
-
 def get_access_info(user_id: int) -> str:
     user = users.find_one({"user_id": user_id})
-    if not user:
+    if not user or "expiry" not in user:
         return "💔 No active access."
 
     remaining = user["expiry"] - datetime.utcnow()
     hours = remaining.seconds // 3600
     minutes = (remaining.seconds % 3600) // 60
-
     return f"⏳ Access remaining: **{hours}h {minutes}m**"
-
 
 # ─────────────────────────────────────────────
 # PAYMENT REQUESTS
@@ -63,7 +57,6 @@ def create_payment_request(user_id: int, hours: int):
         "created_at": datetime.utcnow()
     })
 
-
 def approve_payment(user_id: int):
     req = payments.find_one_and_update(
         {"user_id": user_id, "status": "pending"},
@@ -73,7 +66,6 @@ def approve_payment(user_id: int):
         grant_access(user_id, req["hours"])
         return True
     return False
-
 
 # ─────────────────────────────────────────────
 # SETTINGS (LOG / SESSION GROUP)
@@ -85,28 +77,30 @@ def set_setting(key: str, value: int):
         upsert=True
     )
 
-
 def get_setting(key: str):
     data = settings.find_one({"key": key})
     return data["value"] if data else None
-
 
 # ─────────────────────────────────────────────
 # SESSION STORAGE
 # ─────────────────────────────────────────────
 def add_session(session_string: str):
+    """
+    Add a new session string to DB
+    """
     sessions.insert_one({
         "session": session_string,
         "active": True,
         "added_at": datetime.utcnow()
     })
 
-
 def list_sessions():
+    """
+    Returns all sessions with their DB _id
+    """
     return list(sessions.find())
 
-
-def toggle_session(session_id):
+def toggle_session(session_id: ObjectId):
     sess = sessions.find_one({"_id": session_id})
     if not sess:
         return False
@@ -115,3 +109,22 @@ def toggle_session(session_id):
         {"$set": {"active": not sess["active"]}}
     )
     return True
+
+def get_active_sessions():
+    """
+    Returns all active sessions
+    """
+    return list(sessions.find({"active": True}))
+
+# ─────────────────────────────────────────────
+# QUEUE LOGS
+# ─────────────────────────────────────────────
+def log_queue_task(user_id: int, target_username: str, success_count: int, fail_count: int, elapsed: float):
+    queue_logs.insert_one({
+        "user_id": user_id,
+        "target_username": target_username,
+        "success": success_count,
+        "failed": fail_count,
+        "time_taken": elapsed,
+        "timestamp": datetime.utcnow()
+    })
