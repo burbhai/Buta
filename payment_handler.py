@@ -4,41 +4,67 @@ import db
 import core
 from config import OWNER_IDS
 
+# ─────────────────────────────────────────────
+# REGISTER PAYMENT HANDLER
+# ─────────────────────────────────────────────
 def register_payment_handler(app):
 
-    # USER SENDS PAYMENT SCREENSHOT
+    # ─── USER SENDS PAYMENT SCREENSHOT ─────────
     @app.on_message(filters.private & filters.photo)
     async def payment_screenshot(client, message: Message):
         uid = message.from_user.id
-        log_group_id = db.get_setting("log_group")
-        if log_group_id:
-            caption = f"💰 Payment request from @{message.from_user.username or uid}\nUser ID: {uid}"
-            await client.send_photo(chat_id=log_group_id, photo=message.photo.file_id, caption=caption)
-            # Add Approve button
-            approve_btn = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Approve", callback_data=f"approve:{uid}")]])
-            await client.send_message(chat_id=log_group_id, text="Approve user:", reply_markup=approve_btn)
-        await message.reply("💳 Payment received. Admin will verify.")
+        plan_hours = getattr(message, "plan_hours", 6)  # default fallback
 
-    # ADMIN APPROVES VIA BUTTON
-    @app.on_callback_query(filters.regex(r"^approve:\d+$"))
+        # Record in DB
+        db.record_payment_request(uid, message.photo.file_id, plan_hours)
+
+        # Forward to log group with Approve button
+        log_group_id = db.get_log_group()
+        if log_group_id:
+            approve_btn = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✅ Approve", callback_data=f"approve:{uid}")]]
+            )
+            try:
+                await client.send_photo(
+                    chat_id=log_group_id,
+                    photo=message.photo.file_id,
+                    caption=f"💰 Payment request from @{message.from_user.username or uid}\nUser ID: {uid}\nPlan: {plan_hours}h",
+                    reply_markup=approve_btn
+                )
+            except:
+                pass
+
+        await message.reply("💳 Screenshot received! Admin will verify shortly.")
+
+    # ─── ADMIN APPROVE CALLBACK ────────────────
+    @app.on_callback_query()
     async def approve_callback(client, cb):
+        if not cb.data.startswith("approve:"):
+            return
+
         admin_id = cb.from_user.id
         if admin_id not in OWNER_IDS:
-            await cb.answer("Not allowed", show_alert=True)
+            await cb.answer("❌ Not allowed", show_alert=True)
             return
-        uid = int(cb.data.split(":")[1])
-        success = db.approve_payment(uid)
-        if not success:
-            await cb.answer("No pending payment for user", show_alert=True)
+
+        target_id = int(cb.data.split(":")[1])
+        hours = db.approve_payment(target_id)
+        if not hours:
+            await cb.answer("❌ No pending payment found", show_alert=True)
             return
-        # Grant access in core
-        expiry = db.get_user_expiry(uid)
-        remaining_hours = max(1, int((expiry - db.datetime.utcnow()).total_seconds() // 3600))
-        core.grant_access(uid, remaining_hours)
-        await cb.message.edit_text(f"✅ User {uid} approved. Access granted for {remaining_hours}h")
-        # Notify user privately
+
+        core.grant_access(target_id, hours)
+
+        # Notify user
         try:
-            await client.send_message(uid, f"🎉 Your payment verified. Access granted for {remaining_hours}h!")
-        except Exception:
+            await client.send_message(
+                chat_id=target_id,
+                text=f"🎉 Payment verified! Access granted for {hours}h."
+            )
+        except:
             pass
-        await cb.answer("User approved")
+
+        await cb.message.edit_caption(
+            cb.message.caption + f"\n\n✅ Approved by admin {admin_id}"
+        )
+        await cb.answer("User approved successfully")
