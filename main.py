@@ -10,7 +10,7 @@ import handlers
 import core
 from session_handler import register_session_handler
 from payment_handler import register_payment_handler
-
+from queue_worker import start_queue_monitor
 
 # ─────────────────────────────────────────────
 # LOGGING CONFIGURATION
@@ -54,7 +54,7 @@ def main():
 
     app = create_app()
 
-    # Heroku dyno stop / restart safe
+    # Heroku / manual stop safe
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
@@ -65,8 +65,9 @@ def main():
         register_payment_handler(app)
         logger.info("Handlers registered")
 
-        # Start background queue worker
-        core.start_worker(app)
+        # Start background queue worker thread
+        core.start_worker(app)            # main pre-ban queue worker
+        start_queue_monitor(app)          # optional monitoring thread
         logger.info("Background worker started")
 
         # Start bot (LONG POLLING)
