@@ -1,33 +1,33 @@
 from pymongo import MongoClient
-from config import MONGO_URI, DB_NAME
 from datetime import datetime, timedelta
+from config import MONGO_URI, DB_NAME
 
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 
-users = db.users
-payments = db.payments
-settings = db.settings
+users_col = db["users"]
+payments_col = db["payments"]
 
+# Payment request
 def create_payment_request(user_id: int, hours: int):
-    payments.insert_one({
+    payments_col.insert_one({
         "user_id": user_id,
         "hours": hours,
-        "status": "pending",
-        "created_at": datetime.utcnow()
+        "timestamp": datetime.utcnow(),
+        "approved": False
     })
 
-def approve_payment(user_id: int):
-    payment = payments.find_one({"user_id": user_id, "status": "pending"})
-    if not payment: return False
-    payments.update_one({"_id": payment["_id"]},{"$set":{"status":"approved"}})
-    expiry = datetime.utcnow() + timedelta(hours=payment["hours"])
-    users.update_one({"user_id":user_id},{"$set":{"expiry":expiry}},upsert=True)
+# Approve payment
+def approve_payment(user_id: int) -> bool:
+    doc = payments_col.find_one({"user_id": user_id, "approved": False})
+    if not doc: return False
+    payments_col.update_one({"_id": doc["_id"]}, {"$set":{"approved": True}})
+    expiry = datetime.utcnow() + timedelta(hours=doc["hours"])
+    users_col.update_one({"user_id": user_id}, {"$set":{"expiry": expiry}}, upsert=True)
     return True
 
-def get_setting(key: str):
-    rec = settings.find_one({"key":key})
-    return rec["value"] if rec else None
-
-def set_setting(key: str, value):
-    settings.update_one({"key":key},{"$set":{"value":value}},upsert=True)
+# Check user expiry
+def get_user_expiry(user_id: int):
+    doc = users_col.find_one({"user_id": user_id})
+    if doc: return doc.get("expiry")
+    return None
