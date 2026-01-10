@@ -1,9 +1,16 @@
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram.enums import ChatType
 import core
+import db
 from config import OWNER_IDS, ACCESS_PLANS
 
-# ───────── KEYBOARDS ─────────
+# ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+def is_owner(user_id: int) -> bool:
+    return user_id in OWNER_IDS
+
 def owner_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⚙️ Set Log Group", callback_data="owner:set_log")],
@@ -21,52 +28,58 @@ def user_keyboard():
     ])
 
 def access_plans_keyboard():
-    rows = [[InlineKeyboardButton(f"⏳ {hours} Hours", callback_data=f"user:plan:{key}")] for key, hours in ACCESS_PLANS.items()]
+    rows = []
+    for key, hours in ACCESS_PLANS.items():
+        rows.append([InlineKeyboardButton(f"⏳ {hours} Hours", callback_data=f"user:plan:{key}")])
     return InlineKeyboardMarkup(rows)
 
-# ───────── OWNER CHECK ─────────
-def is_owner(user_id: int):
-    return user_id in OWNER_IDS
-
-# ───────── REGISTER HANDLERS ─────────
+# ─────────────────────────────────────────────
+# REGISTER HANDLERS
+# ─────────────────────────────────────────────
 def register(app):
 
     @app.on_message(filters.command("start") & filters.private)
     async def start_cmd(client, message: Message):
         uid = message.from_user.id
+
         if is_owner(uid):
-            await message.reply("👑 Owner Control Panel", reply_markup=owner_keyboard())
-        else:
             await message.reply(
-                "Hey 👋 Welcome to StartLove ✨",
-                reply_markup=user_keyboard()
+                "👑 **Owner Control Panel**\n\nChoose an option below:",
+                reply_markup=owner_keyboard()
             )
+            return
+
+        await message.reply(
+            "Hey 👋 Welcome to **StartLove ✨**\nSend usernames quietly 🌿",
+            reply_markup=user_keyboard()
+        )
 
     @app.on_callback_query()
     async def callbacks(client, cb):
         uid = cb.from_user.id
         data = cb.data
 
-        # ── OWNER CALLBACKS
         if data.startswith("owner:"):
             if not is_owner(uid):
                 await cb.answer("Not allowed", show_alert=True)
                 return
             action = data.split(":", 1)[1]
             if action == "set_log":
-                await cb.message.reply("Send /set_log in your target group")
+                await cb.message.reply(
+                    "🔧 Add me to the group & make admin, then send /set_log here."
+                )
             elif action == "set_session":
-                await cb.message.reply("Send /set_session in your session group")
+                await cb.message.reply(
+                    "🗂 Add me to a private group & make admin, then send /set_session here."
+                )
             elif action == "manage_sessions":
                 text, keyboard = core.get_sessions_overview()
                 await cb.message.reply(text, reply_markup=keyboard)
             elif action == "status":
-                status = core.get_system_status()
-                await cb.message.reply(status)
+                await cb.message.reply(core.get_system_status())
             await cb.answer()
             return
 
-        # ── USER CALLBACKS
         if data.startswith("user:"):
             action = data.split(":", 1)[1]
             if action == "start":
@@ -75,42 +88,38 @@ def register(app):
                     await cb.answer()
                     return
                 core.mark_waiting_for_username(uid)
-                await cb.message.reply("✨ Send username (@username)")
+                await cb.message.reply("✨ Send the **username** you want us to handle.\nExample: `@username`")
             elif action == "get_access":
-                await cb.message.reply("Choose plan:", reply_markup=access_plans_keyboard())
+                await cb.message.reply("🔓 Choose access duration:", reply_markup=access_plans_keyboard())
             elif action == "my_access":
-                info = core.get_access_info(uid)
-                await cb.message.reply(info)
+                await cb.message.reply(core.get_access_info(uid))
             elif action == "help":
-                await cb.message.reply("ℹ️ Help: Get Access → Send username → Relax 🌿")
+                await cb.message.reply("ℹ️ Send usernames during active access. Requests handled one by one.")
             elif action.startswith("plan:"):
                 plan_key = action.split(":", 1)[1]
                 hours = ACCESS_PLANS.get(plan_key)
                 if not hours:
                     await cb.answer("Invalid plan", show_alert=True)
                     return
-                core.create_payment_request(uid, hours)
-                await cb.message.reply(f"Selected {hours}h. Upload payment screenshot.")
+                db.create_payment_request(uid, hours)
+                await cb.message.reply(f"💳 Selected: {hours}h. Upload screenshot for verification.")
             await cb.answer()
             return
 
-    # ── SET LOG GROUP
     @app.on_message(filters.command("set_log") & filters.group)
     async def set_log_group(client, message: Message):
         if not is_owner(message.from_user.id):
             return
         core.set_log_group(message.chat.id)
-        await message.reply("✅ Log group set.")
+        await message.reply("✅ Log group set successfully.")
 
-    # ── SET SESSION GROUP
     @app.on_message(filters.command("set_session") & filters.group)
     async def set_session_group(client, message: Message):
         if not is_owner(message.from_user.id):
             return
         core.set_session_group(message.chat.id)
-        await message.reply("✅ Session group set.")
+        await message.reply("✅ Session group connected. Owner can send sessions here.")
 
-    # ── USER SENDS USERNAME
     @app.on_message(filters.private & filters.text)
     async def username_receiver(client, message: Message):
         uid = message.from_user.id
@@ -118,14 +127,14 @@ def register(app):
             return
         username = message.text.strip()
         if not username.startswith("@") or len(username) < 4:
-            await message.reply("❌ Invalid username. Start with @")
+            await message.reply("❌ Invalid username.")
             return
         if not core.has_active_access(uid):
-            await message.reply("💔 Access expired.")
+            await message.reply("💔 Your access expired.")
             core.clear_waiting(uid)
             return
         position = core.enqueue_request(uid, username)
         if position == 0:
-            await message.reply("💫 Task started. Relax 🌿")
+            await message.reply("💫 Processing now. Relax 🌿")
         else:
-            await message.reply(f"⏳ You are in queue. Position #{position}")
+            await message.reply(f"⏳ In queue. Position: **#{position}**")
