@@ -6,7 +6,7 @@ import asyncio
 from pyrogram import Client, idle
 from pyrogram.errors import RPCError
 
-from config import API_ID, API_HASH, BOT_TOKEN, DEBUG, SESSION_GROUP_ID
+from config import API_ID, API_HASH, BOT_TOKEN, DEBUG
 import handlers
 import core
 from session_loader import register_session_handler
@@ -23,6 +23,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("StartLove")
 
+
 # ─────────────────────────────────────────────
 # CREATE PYROGRAM BOT CLIENT
 # ─────────────────────────────────────────────
@@ -36,12 +37,18 @@ def create_app() -> Client:
         in_memory=True  # safe for Heroku (no local session file)
     )
 
+
 # ─────────────────────────────────────────────
 # GRACEFUL SHUTDOWN HANDLER
 # ─────────────────────────────────────────────
 def shutdown_handler(signum, frame):
     logger.warning(f"Received signal {signum}, shutting down...")
+    try:
+        asyncio.get_event_loop().stop()
+    except Exception:
+        pass
     sys.exit(0)
+
 
 # ─────────────────────────────────────────────
 # MAIN ENTRY POINT
@@ -86,10 +93,12 @@ def main():
     finally:
         try:
             # Stop bot gracefully
-            app.stop()
-            logger.info("Bot stopped gracefully")
+            if app:
+                app.stop()
+                logger.info("Bot stopped gracefully")
         except Exception:
             pass
+
 
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
