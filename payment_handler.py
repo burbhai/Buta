@@ -10,18 +10,12 @@ import core
 # ─────────────────────────────────────────────
 def register_payment_handler(app):
 
-    # User uploads payment screenshot in private chat
+    # ─── USER UPLOADS PAYMENT SCREENSHOT ──────
     @app.on_message(filters.private & filters.photo)
     async def payment_screenshot(client, message: Message):
         uid = message.from_user.id
 
-        if not core.has_active_access(uid):
-            await message.reply(
-                "💳 Thanks! Your payment request has been received.\n"
-                "An admin will verify it shortly."
-            )
-
-        # Forward to log group
+        # Forward to log group for admin verification
         log_group_id = db.get_setting("log_group")
         if log_group_id:
             caption = f"💰 Payment request from @{message.from_user.username or uid}\nUser ID: {uid}"
@@ -34,16 +28,16 @@ def register_payment_handler(app):
             except Exception:
                 pass
 
-        await message.reply("✅ Screenshot forwarded for admin approval.")
+        await message.reply(
+            "💳 Thanks! Your payment request has been received.\n"
+            "An admin will verify it shortly."
+        )
 
-
-    # Admin approves user manually in log group
+    # ─── ADMIN APPROVES PAYMENT ───────────────
     @app.on_message(filters.command("approve") & filters.group)
     async def approve_user(client, message: Message):
-        uid = message.from_user.id
-        chat_id = message.chat.id
-
-        if uid not in OWNER_IDS:
+        admin_id = message.from_user.id
+        if admin_id not in OWNER_IDS:
             return
 
         args = message.text.split()
@@ -57,17 +51,29 @@ def register_payment_handler(app):
             await message.reply("❌ Invalid user ID.")
             return
 
-        # Grant access (default 6h for example)
-        db.approve_payment(target_id)
-        core.grant_access(target_id, 6)  # Or load from db if dynamic hours
+        # Approve payment in DB
+        success = db.approve_payment(target_id)
+        if not success:
+            await message.reply(f"❌ No pending payment found for user {target_id}.")
+            return
 
-        await message.reply(f"✅ User {target_id} approved and access granted.")
+        # Grant access dynamically based on DB hours or fallback
+        user_record = db.users.find_one({"user_id": target_id})
+        hours = 6  # fallback
+        if user_record and "expiry" in user_record:
+            # Calculate hours from expiry - now
+            remaining = user_record["expiry"] - db.datetime.utcnow()
+            hours = max(1, int(remaining.total_seconds() // 3600))
+
+        core.grant_access(target_id, hours)
+
+        await message.reply(f"✅ User {target_id} approved. Access granted for {hours}h.")
 
         # Notify user privately
         try:
             await client.send_message(
                 chat_id=target_id,
-                text="🎉 Your payment has been verified. Access granted!"
+                text=f"🎉 Your payment has been verified. Access granted for {hours}h!"
             )
         except Exception:
             pass
