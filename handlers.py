@@ -45,7 +45,7 @@ def access_plans_keyboard():
 
 
 # ─────────────────────────────────────────────
-# REGISTER ALL HANDLERS
+# REGISTER HANDLERS
 # ─────────────────────────────────────────────
 def register(app):
 
