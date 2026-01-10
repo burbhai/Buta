@@ -1,8 +1,10 @@
+# payment_handler.py
 from pyrogram import filters
 from pyrogram.types import Message
 from config import OWNER_IDS
 import db
 import core
+from datetime import datetime, timezone
 
 
 # ─────────────────────────────────────────────
@@ -14,11 +16,12 @@ def register_payment_handler(app):
     @app.on_message(filters.private & filters.photo)
     async def payment_screenshot(client, message: Message):
         uid = message.from_user.id
+        username = message.from_user.username or str(uid)
 
         # Forward to log group for admin verification
-        log_group_id = db.get_setting("log_group")
+        log_group_id = db.get_setting("log_group") or core.LOG_GROUP_ID
         if log_group_id:
-            caption = f"💰 Payment request from @{message.from_user.username or uid}\nUser ID: {uid}"
+            caption = f"💰 Payment request from @{username}\nUser ID: {uid}"
             try:
                 await client.send_photo(
                     chat_id=log_group_id,
@@ -38,6 +41,7 @@ def register_payment_handler(app):
     async def approve_user(client, message: Message):
         admin_id = message.from_user.id
         if admin_id not in OWNER_IDS:
+            await message.reply("❌ You are not allowed to approve payments.")
             return
 
         args = message.text.split()
@@ -59,11 +63,12 @@ def register_payment_handler(app):
 
         # Grant access dynamically based on DB hours or fallback
         user_record = db.users.find_one({"user_id": target_id})
-        hours = 6  # fallback
+        hours = 6  # fallback default
         if user_record and "expiry" in user_record:
-            # Calculate hours from expiry - now
-            remaining = user_record["expiry"] - db.datetime.utcnow()
-            hours = max(1, int(remaining.total_seconds() // 3600))
+            expiry_time = user_record["expiry"]
+            if isinstance(expiry_time, datetime):
+                remaining = expiry_time - datetime.now(timezone.utc)
+                hours = max(1, int(remaining.total_seconds() // 3600))
 
         core.grant_access(target_id, hours)
 
