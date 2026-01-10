@@ -1,14 +1,22 @@
 import logging
 import sys
 import signal
+import asyncio
+
 from pyrogram import Client, idle
 from pyrogram.errors import RPCError
-import handlers, core
+
+from config import API_ID, API_HASH, BOT_TOKEN, DEBUG
+import handlers
+import core
+import db
 from session_loader import register_session_handler
 from payment_handler import register_payment_handler
 from queue_handler import start_queue_monitor
-from config import API_ID, API_HASH, BOT_TOKEN, DEBUG
 
+# ─────────────────────────────────────────────
+# LOGGING CONFIGURATION
+# ─────────────────────────────────────────────
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -16,6 +24,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("StartLove")
 
+# ─────────────────────────────────────────────
+# CREATE PYROGRAM BOT CLIENT
+# ─────────────────────────────────────────────
 def create_app() -> Client:
     return Client(
         name="startlove_bot",
@@ -23,37 +34,72 @@ def create_app() -> Client:
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
         workers=50,
-        in_memory=True
+        in_memory=True  # safe for Heroku
     )
 
+# ─────────────────────────────────────────────
+# GRACEFUL SHUTDOWN HANDLER
+# ─────────────────────────────────────────────
 def shutdown_handler(signum, frame):
     logger.warning(f"Received signal {signum}, shutting down...")
+    try:
+        asyncio.get_event_loop().stop()
+    except Exception:
+        pass
     sys.exit(0)
 
+# ─────────────────────────────────────────────
+# MAIN ENTRY POINT
+# ─────────────────────────────────────────────
 def main():
-    logger.info("Starting StartLove Bot...")
+    logger.info("Initializing StartLove Bot...")
+
     app = create_app()
+
+    # Register OS signals for graceful shutdown
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
+
     try:
-        handlers.register(app)
-        register_session_handler(app)
-        register_payment_handler(app)
-        core.start_worker(app)
-        start_queue_monitor(app)
+        # ───── REGISTER HANDLERS ─────
+        handlers.register(app)                 # main user + owner handlers
+        register_session_handler(app)          # multi-session pre-ban
+        register_payment_handler(app)          # payment verification
+        logger.info("Handlers registered")
+
+        # ───── START BACKGROUND WORKERS ─────
+        core.start_worker(app)                 # main queue worker
+        start_queue_monitor(app)               # optional monitor/logging thread
+        logger.info("Background workers started")
+
+        # ───── START BOT ─────
         app.start()
-        logger.info("Bot started successfully")
+        logger.info("Bot started successfully (Polling mode)")
+
+        # Keep bot alive
         idle()
+
     except KeyboardInterrupt:
         logger.warning("Bot stopped manually")
+
     except RPCError as e:
         logger.error(f"Telegram RPC error: {e}")
-    except Exception as e:
-        logger.exception(f"Fatal error: {e}")
-    finally:
-        if app:
-            app.stop()
-            logger.info("Bot stopped gracefully")
 
+    except Exception as e:
+        logger.exception(f"Unexpected fatal error: {e}")
+
+    finally:
+        try:
+            # Stop bot gracefully
+            if app:
+                app.stop()
+                logger.info("Bot stopped gracefully")
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────
+# ENTRY POINT
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     main()
