@@ -36,11 +36,10 @@ def user_keyboard():
 
 
 def access_plans_keyboard():
-    rows = []
-    for key, hours in ACCESS_PLANS.items():
-        rows.append(
-            [InlineKeyboardButton(f"⏳ {hours} Hours", callback_data=f"user:plan:{key}")]
-        )
+    rows = [
+        [InlineKeyboardButton(f"⏳ {hours} Hours", callback_data=f"user:plan:{key}")]
+        for key, hours in ACCESS_PLANS.items()
+    ]
     return InlineKeyboardMarkup(rows)
 
 
@@ -62,8 +61,7 @@ def register(app):
             return
 
         await message.reply(
-            "Hey 👋\n\n"
-            "Welcome to **StartLove ✨**\n\n"
+            "Hey 👋\n\nWelcome to **StartLove ✨**\n"
             "We quietly help keep things calm & stress-free 💙",
             reply_markup=user_keyboard()
         )
@@ -77,27 +75,25 @@ def register(app):
         # ── OWNER CALLBACKS ────────────────────
         if data.startswith("owner:"):
             if not is_owner(uid):
-                await cb.answer("Not allowed", show_alert=True)
+                await cb.answer("❌ Not allowed", show_alert=True)
                 return
 
             action = data.split(":", 1)[1]
 
             if action == "set_log":
                 await cb.message.reply(
-                    "🔧 **Set Log Group**\n\n"
+                    "🔧 **Set Log Group**\n"
                     "1️⃣ Add me to the target group\n"
                     "2️⃣ Make me admin\n"
-                    "3️⃣ Send this command in that group:\n\n"
-                    "`/set_log`"
+                    "3️⃣ Send `/set_log` in that group"
                 )
 
             elif action == "set_session":
                 await cb.message.reply(
-                    "🗂 **Set Session Group**\n\n"
+                    "🗂 **Set Session Group**\n"
                     "1️⃣ Create a private group\n"
                     "2️⃣ Add me as admin\n"
-                    "3️⃣ Send this command in that group:\n\n"
-                    "`/set_session`"
+                    "3️⃣ Send `/set_session` in that group"
                 )
 
             elif action == "manage_sessions":
@@ -118,7 +114,7 @@ def register(app):
             if action == "start":
                 if not core.has_active_access(uid):
                     await cb.message.reply(
-                        "💔 You don’t have active access right now.\n\n"
+                        "💔 You don’t have active access right now.\n"
                         "Tap **Get Access** to continue."
                     )
                     await cb.answer()
@@ -126,14 +122,13 @@ def register(app):
 
                 core.mark_waiting_for_username(uid)
                 await cb.message.reply(
-                    "✨ Please send the **username** you want us to quietly handle.\n\n"
+                    "✨ Send the **username** you want us to handle.\n"
                     "Example:\n`@username`"
                 )
 
             elif action == "get_access":
                 await cb.message.reply(
-                    "🔓 **Unlock Access**\n\n"
-                    "Choose how long you want access for:",
+                    "🔓 **Unlock Access**\nChoose duration:",
                     reply_markup=access_plans_keyboard()
                 )
 
@@ -143,11 +138,10 @@ def register(app):
 
             elif action == "help":
                 await cb.message.reply(
-                    "ℹ️ **Help**\n\n"
+                    "ℹ️ **Help**\n"
                     "• Unlock access to start\n"
                     "• Send usernames during active time\n"
-                    "• Requests are handled one by one\n\n"
-                    "That’s it 🌿"
+                    "• Requests are handled one by one"
                 )
 
             elif action.startswith("plan:"):
@@ -155,15 +149,14 @@ def register(app):
                 hours = ACCESS_PLANS.get(plan_key)
 
                 if not hours:
-                    await cb.answer("Invalid plan", show_alert=True)
+                    await cb.answer("❌ Invalid plan", show_alert=True)
                     return
 
                 core.create_payment_request(uid, hours)
                 await cb.message.reply(
-                    f"💳 **Access Verification**\n\n"
-                    f"Selected duration: **{hours} hours**\n\n"
-                    "Please complete payment and upload a screenshot.\n"
-                    "An admin will verify it shortly."
+                    f"💳 **Access Verification**\n"
+                    f"Selected duration: **{hours} hours**\n"
+                    "Upload payment screenshot, admin will verify."
                 )
 
             await cb.answer()
@@ -173,9 +166,6 @@ def register(app):
     @app.on_message(filters.command("set_log") & filters.group)
     async def set_log_group(client, message):
         if not is_owner(message.from_user.id):
-            return
-
-        if message.chat.type not in (ChatType.SUPERGROUP, ChatType.GROUP):
             return
 
         core.set_log_group(message.chat.id)
@@ -189,8 +179,8 @@ def register(app):
 
         core.set_session_group(message.chat.id)
         await message.reply(
-            "✅ Session group connected.\n\n"
-            "You can now send session strings here (owner only)."
+            "✅ Session group connected.\n"
+            "Owner can now add sessions here."
         )
 
     # ─── USER SENDS USERNAME ──────────────────
@@ -204,7 +194,7 @@ def register(app):
         username = message.text.strip()
 
         if not username.startswith("@") or len(username) < 4:
-            await message.reply("❌ Please send a valid username starting with @")
+            await message.reply("❌ Send a valid username starting with @")
             return
 
         if not core.has_active_access(uid):
@@ -215,12 +205,6 @@ def register(app):
         position = core.enqueue_request(uid, username)
 
         if position == 0:
-            await message.reply(
-                "💫 We’re taking care of this now.\n"
-                "Please relax 🌿"
-            )
+            await message.reply("💫 We’re processing this now. Relax 🌿")
         else:
-            await message.reply(
-                f"⏳ You’re in line.\n"
-                f"Queue position: **#{position}**"
-            )
+            await message.reply(f"⏳ You’re in line. Queue position: **#{position}**")
