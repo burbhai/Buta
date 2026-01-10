@@ -1,103 +1,33 @@
-import logging
-import sys
-import signal
 import asyncio
+from pyrogram import Client, filters
+from config import Config
+from db import get_settings, add_session
+from core import pre_ban_worker, ban_queue
+from session_manager import validate_session # Needs to be defined to check string
 
-from pyrogram import Client, idle
-from pyrogram.errors import RPCError
+bot = Client("PreBanBot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN, in_memory=True)
 
-from config import API_ID, API_HASH, BOT_TOKEN, DEBUG
-import handlers
-import core
-from session_loader import register_session_handler
-from payment_handler import register_payment_handler
-from queue_handler import start_queue_monitor  # renamed for clarity
-
-# ─────────────────────────────────────────────
-# LOGGING CONFIGURATION
-# ─────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.DEBUG if DEBUG else logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-logger = logging.getLogger("StartLove")
-
-# ─────────────────────────────────────────────
-# CREATE PYROGRAM BOT CLIENT
-# ─────────────────────────────────────────────
-def create_app() -> Client:
-    return Client(
-        name="startlove_bot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN,
-        workers=50,
-        in_memory=True  # safe for Heroku (no local session file)
-    )
-
-# ─────────────────────────────────────────────
-# GRACEFUL SHUTDOWN HANDLER
-# ─────────────────────────────────────────────
-def shutdown_handler(signum, frame):
-    logger.warning(f"Received signal {signum}, shutting down...")
-    try:
-        loop = asyncio.get_event_loop()
-        loop.stop()
-    except Exception:
-        pass
-    sys.exit(0)
-
-# ─────────────────────────────────────────────
-# MAIN ENTRY POINT
-# ─────────────────────────────────────────────
-def main():
-    logger.info("Initializing StartLove Bot...")
-
-    app = create_app()
-
-    # Register OS signals for graceful shutdown
-    signal.signal(signal.SIGTERM, shutdown_handler)
-    signal.signal(signal.SIGINT, shutdown_handler)
-
-    try:
-        # ── REGISTER HANDLERS ──
-        handlers.register(app)
-        register_session_handler(app)       # multi-session pre-ban
-        register_payment_handler(app)       # payment verification
-        logger.info("Handlers registered")
-
-        # ── START BACKGROUND WORKERS ──
-        core.start_worker(app)              # main pre-ban queue worker
-        start_queue_monitor(app)            # optional queue monitoring
-        logger.info("Background workers started")
-
-        # ── START BOT (LONG POLLING) ──
-        app.start()
-        logger.info("Bot started successfully (Polling mode)")
-
-        # ── KEEP BOT RUNNING ──
-        idle()
-
-    except KeyboardInterrupt:
-        logger.warning("Bot stopped manually")
-
-    except RPCError as e:
-        logger.error(f"Telegram RPC error: {e}")
-
-    except Exception as e:
-        logger.exception(f"Unexpected fatal error: {e}")
-
-    finally:
+@bot.on_message(filters.text & filters.group)
+async def auto_session_val(client, message):
+    conf = await get_settings()
+    if message.chat.id == conf.get("session_group") and message.from_user.id in Config.OWNERS:
+        # Assume message.text is the session string
+        temp = Client("temp", session_string=message.text, api_id=Config.API_ID, api_hash=Config.API_HASH, in_memory=True)
         try:
-            if app:
-                app.stop()
-                logger.info("Bot stopped gracefully")
-        except Exception:
-            pass
+            await temp.start()
+            me = await temp.get_me()
+            await add_session(message.text, me.first_name, me.phone_number)
+            await temp.stop()
+            await message.reply(f"✅ Session Valid: {me.first_name} added.")
+        except Exception as e:
+            await message.reply(f"❌ Invalid Session: {e}")
 
-# ─────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────
+async def main():
+    await bot.start()
+    asyncio.create_task(pre_ban_worker(bot))
+    print("Bot is running...")
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
-    main()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
