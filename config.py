@@ -44,3 +44,8 @@ TASK_COOLDOWN = int(os.getenv("TASK_COOLDOWN", 5))          # seconds between ta
 # RUNTIME FLAGS
 # ─────────────────────────────────────────────
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+# ─────────────────────────────────────────────
+# SESSION GROUP (Dynamic, set by /set_session)
+# ─────────────────────────────────────────────
+SESSION_GROUP_ID = None
