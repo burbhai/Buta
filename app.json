@@ -27,11 +27,23 @@
     },
     "DB_NAME": {
       "description": "Database name",
-      "value": "startlove"
+      "value": "startlove",
+      "required": false
     },
     "DEBUG": {
       "description": "Debug mode (true/false)",
-      "value": "false"
+      "value": "false",
+      "required": false
+    },
+    "QUEUE_CHECK_DELAY": {
+      "description": "Seconds between queue checks",
+      "value": "2",
+      "required": false
+    },
+    "TASK_COOLDOWN": {
+      "description": "Seconds each task takes",
+      "value": "5",
+      "required": false
     }
   }
 }
