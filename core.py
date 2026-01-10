@@ -4,18 +4,22 @@ import asyncio
 from typing import Dict, List, Tuple
 from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import RPCError
 from config import QUEUE_CHECK_DELAY, TASK_COOLDOWN
 
 # ─────────────────────────────────────────────
 # RUNTIME STORAGE
 # ─────────────────────────────────────────────
-USER_ACCESS: Dict[int, float] = {}
-WAITING_USERS = set()
-QUEUE: List[Tuple[int, str]] = []
+USER_ACCESS: Dict[int, float] = {}       # user_id -> expiry timestamp
+WAITING_USERS = set()                     # users waiting to send username
+QUEUE: List[Tuple[int, str]] = []        # (user_id, username)
 ACTIVE_TASK = False
 LOG_GROUP_ID = None
 SESSION_GROUP_ID = None
-SESSIONS: List[dict] = []
+
+# Session dict: {"id": int, "active": bool, "string": str, "client": Client, "owner_id": int}
+SESSIONS: List[Dict] = []
+
 LOCK = threading.Lock()
 
 # ─────────────────────────────────────────────
@@ -34,15 +38,17 @@ def get_access_info(user_id: int) -> str:
     remaining = int(USER_ACCESS[user_id] - time.time())
     hrs = remaining // 3600
     mins = (remaining % 3600) // 60
-    return f"💼 **My Access**\n\nTime remaining: **{hrs}h {mins}m**\n\nYou can continue sending usernames 🌿"
+    return f"💼 **My Access**\n\nTime remaining: **{hrs}h {mins}m**\nYou can continue sending usernames 🌿"
 
 # ─────────────────────────────────────────────
 # WAITING USERS MANAGEMENT
 # ─────────────────────────────────────────────
 def mark_waiting_for_username(user_id: int):
     WAITING_USERS.add(user_id)
+
 def is_waiting_for_username(user_id: int) -> bool:
     return user_id in WAITING_USERS
+
 def clear_waiting(user_id: int):
     WAITING_USERS.discard(user_id)
 
@@ -53,7 +59,7 @@ def enqueue_request(user_id: int, username: str) -> int:
     with LOCK:
         clear_waiting(user_id)
         QUEUE.append((user_id, username))
-        return len(QUEUE) - 1
+        return len(QUEUE) - 1  # 0 = processing now
 
 # ─────────────────────────────────────────────
 # OWNER GROUP SETTERS
@@ -61,9 +67,19 @@ def enqueue_request(user_id: int, username: str) -> int:
 def set_log_group(chat_id: int):
     global LOG_GROUP_ID
     LOG_GROUP_ID = chat_id
+
 def set_session_group(chat_id: int):
     global SESSION_GROUP_ID
     SESSION_GROUP_ID = chat_id
+
+# ─────────────────────────────────────────────
+# PAYMENT STUB
+# ─────────────────────────────────────────────
+def create_payment_request(user_id: int, hours: int):
+    """
+    Manual approval flow: owner approves -> call grant_access(user_id, hours)
+    """
+    pass
 
 # ─────────────────────────────────────────────
 # SESSION MANAGEMENT
@@ -83,12 +99,15 @@ def get_sessions_overview():
 def get_system_status() -> str:
     with LOCK:
         q_len = len(QUEUE)
-    return f"📊 **System Status**\n\nActive task: {'Yes' if ACTIVE_TASK else 'No'}\nQueue length: {q_len}\nLog group set: {'Yes' if LOG_GROUP_ID else 'No'}\nSession group set: {'Yes' if SESSION_GROUP_ID else 'No'}"
+    return f"📊 **System Status**\nActive task: {'Yes' if ACTIVE_TASK else 'No'}\nQueue length: {q_len}\nLog group set: {'Yes' if LOG_GROUP_ID else 'No'}\nSession group set: {'Yes' if SESSION_GROUP_ID else 'No'}"
 
 # ─────────────────────────────────────────────
-# BACKGROUND WORKER
+# BACKGROUND WORKER + MULTI-SESSION PRE-BAN
 # ─────────────────────────────────────────────
 def start_worker(app: Client):
+    """
+    Processes QUEUE, multi-session pre-ban using validated sessions.
+    """
     global ACTIVE_TASK
 
     def worker_loop():
@@ -111,15 +130,35 @@ def start_worker(app: Client):
 
                 async def process_user():
                     nonlocal ban_success, ban_failed
+
                     for sess in SESSIONS:
-                        if not sess.get("active") or not sess.get("client"):
+                        if not sess.get("active"):
                             continue
+
+                        # Lazy initialize client if not yet created
+                        if not sess.get("client"):
+                            try:
+                                sess_client = Client(
+                                    name=f"session_{sess['id']}",
+                                    session_string=sess["string"],
+                                    api_id=int(app.api_id),
+                                    api_hash=app.api_hash
+                                )
+                                await sess_client.start()
+                                sess["client"] = sess_client
+                            except Exception:
+                                sess["active"] = False
+                                continue
+
                         client: Client = sess["client"]
+
                         try:
                             async for dialog in client.get_dialogs():
                                 chat = dialog.chat
                                 if chat.type not in ["supergroup", "channel"]:
                                     continue
+
+                                # Check if client is admin
                                 try:
                                     me = await client.get_me()
                                     member = await client.get_chat_member(chat.id, me.id)
@@ -127,6 +166,8 @@ def start_worker(app: Client):
                                         continue
                                 except Exception:
                                     continue
+
+                                # Ban target user
                                 try:
                                     target = await client.get_users(username)
                                     await client.ban_chat_member(chat.id, target.id)
@@ -134,21 +175,28 @@ def start_worker(app: Client):
                                 except Exception:
                                     ban_failed += 1
                         except Exception:
+                            sess["active"] = False
                             continue
 
                 loop.run_until_complete(process_user())
                 elapsed = round(time.time() - start_time, 2)
 
-                # Log
+                # Log group notification
                 if LOG_GROUP_ID:
                     try:
-                        app.send_message(LOG_GROUP_ID, f"✅ Pre-ban {username}\nSuccess: {ban_success} | Failed: {ban_failed} | {elapsed}s")
+                        app.send_message(
+                            LOG_GROUP_ID,
+                            f"✅ Pre-ban completed for {username}\nSuccess: {ban_success} | Failed: {ban_failed} | Time: {elapsed}s"
+                        )
                     except Exception:
                         pass
 
                 # Notify user
                 try:
-                    app.send_message(user_id, f"💫 Your target @{username} processed.\nSuccess: {ban_success} | Failed: {ban_failed}")
+                    app.send_message(
+                        user_id,
+                        f"💫 @{username} processed.\nSuccess: {ban_success} | Failed: {ban_failed}"
+                    )
                 except Exception:
                     pass
 
