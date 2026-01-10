@@ -1,0 +1,37 @@
+{
+  "name": "StartLove Bot",
+  "description": "Private moderation assistant bot (Polling Mode)",
+  "repository": "https://github.com/yourusername/startlove-bot",
+  "keywords": ["telegram", "pyrogram", "bot", "moderation"],
+  "stack": "heroku-22",
+  "env": {
+    "API_ID": {
+      "description": "Telegram API ID",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "Telegram API HASH",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Telegram Bot Token",
+      "required": true
+    },
+    "OWNER_IDS": {
+      "description": "Owner user IDs (comma separated)",
+      "required": true
+    },
+    "MONGO_URI": {
+      "description": "MongoDB Atlas connection URI",
+      "required": true
+    },
+    "DB_NAME": {
+      "description": "Database name",
+      "value": "startlove"
+    },
+    "DEBUG": {
+      "description": "Debug mode (true/false)",
+      "value": "false"
+    }
+  }
+}
