@@ -5,42 +5,56 @@ from datetime import datetime, timedelta
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 users_col = db["users"]
-settings_col = db["settings"]
 
 # ─────────────────────────────────────────────
-# SETTINGS
+# Create or update user access
 # ─────────────────────────────────────────────
-def set_setting(key: str, value):
-    settings_col.update_one({"key": key}, {"$set": {"value": value}}, upsert=True)
-
-def get_setting(key: str):
-    doc = settings_col.find_one({"key": key})
-    return doc["value"] if doc else None
-
-# ─────────────────────────────────────────────
-# PAYMENTS
-# ─────────────────────────────────────────────
-def create_payment_request(user_id: int, hours: int):
-    """Create a payment request (user sends screenshot later)"""
-    expiry_time = datetime.utcnow() + timedelta(hours=hours)
+def grant_user_access(user_id: int, hours: int):
+    expiry = datetime.utcnow() + timedelta(hours=hours)
     users_col.update_one(
         {"user_id": user_id},
-        {"$set": {"status": "pending", "expiry": expiry_time}},
+        {"$set": {"user_id": user_id, "expiry": expiry}},
+        upsert=True
+    )
+    return expiry
+
+# ─────────────────────────────────────────────
+# Record payment screenshot request
+# ─────────────────────────────────────────────
+def record_payment_request(user_id: int, file_id: str, plan_hours: int):
+    users_col.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "payment_file_id": file_id,
+            "plan_hours": plan_hours,
+            "status": "pending",
+            "requested_at": datetime.utcnow()
+        }},
         upsert=True
     )
 
-def approve_payment(user_id: int) -> bool:
-    """Admin approves payment, returns True if success"""
-    user = users_col.find_one({"user_id": user_id})
-    if not user or user.get("status") != "pending":
+# ─────────────────────────────────────────────
+# Approve user payment
+# ─────────────────────────────────────────────
+def approve_payment(user_id: int):
+    user = users_col.find_one({"user_id": user_id, "status": "pending"})
+    if not user:
         return False
-    users_col.update_one({"user_id": user_id}, {"$set": {"status": "approved"}})
-    return True
 
-def get_user_status(user_id: int):
-    user = users_col.find_one({"user_id": user_id})
-    return user.get("status") if user else None
+    hours = user.get("plan_hours", 6)
+    expiry = grant_user_access(user_id, hours)
+    users_col.update_one(
+        {"user_id": user_id},
+        {"$set": {"status": "approved", "expiry": expiry}}
+    )
+    return hours
 
-def get_user_expiry(user_id: int):
-    user = users_col.find_one({"user_id": user_id})
-    return user.get("expiry") if user else None
+# ─────────────────────────────────────────────
+# Get log group from DB
+# ─────────────────────────────────────────────
+def get_log_group():
+    setting = db["settings"].find_one({"key": "log_group"})
+    return setting.get("value") if setting else None
+
+def set_log_group(chat_id: int):
+    db["settings"].update_one({"key": "log_group"}, {"$set": {"value": chat_id}}, upsert=True)
