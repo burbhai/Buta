@@ -1,34 +1,31 @@
-from pymongo import MongoClient
-from config import MONGO_URI
-import time
+from motor.motor_asyncio import AsyncIOMotorClient
+from config import Config
+from datetime import datetime, timedelta
 
-mongo = MongoClient(MONGO_URI)
-db = mongo["preban_bot"]
+client = AsyncIOMotorClient(Config.MONGO_URI)
+db = client.preban_db
 
+# Collections
 users = db.users
 sessions = db.sessions
-payments = db.payments
 settings = db.settings
 
+async def get_settings():
+    return await settings.find_one({"id": "bot_config"}) or {}
 
-def get_setting(key, default=None):
-    s = settings.find_one({"_id": key})
-    return s["value"] if s else default
+async def update_setting(key, value):
+    await settings.update_one({"id": "bot_config"}, {"$set": {key: value}}, upsert=True)
 
-
-def set_setting(key, value):
-    settings.update_one({"_id": key}, {"$set": {"value": value}}, upsert=True)
-
-
-def grant_access(user_id, seconds):
-    expiry = int(time.time()) + seconds
-    users.update_one(
-        {"user_id": user_id},
-        {"$set": {"expiry": expiry, "active": True}},
+async def add_session(session_str, name, phone):
+    await sessions.update_one(
+        {"phone": phone},
+        {"$set": {"string": session_str, "name": name, "active": True}},
         upsert=True
     )
 
+async def get_active_sessions():
+    return await sessions.find({"active": True}).to_list(length=None)
 
-def has_access(user_id):
-    u = users.find_one({"user_id": user_id})
-    return u and u.get("active") and u.get("expiry", 0) > time.time()
+async def give_access(user_id, hours):
+    expiry = datetime.utcnow() + timedelta(hours=hours)
+    await users.update_one({"user_id": user_id}, {"$set": {"expiry": expiry}}, upsert=True)
