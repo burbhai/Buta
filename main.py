@@ -1,14 +1,15 @@
 import logging
 import sys
 import signal
+import asyncio
 
 from pyrogram import Client, idle
 from pyrogram.errors import RPCError
 
-from config import API_ID, API_HASH, BOT_TOKEN, DEBUG
+from config import API_ID, API_HASH, BOT_TOKEN, DEBUG, SESSION_GROUP_ID
 import handlers
 import core
-from session_handler import register_session_handler
+from session_loader import register_session_handler
 from payment_handler import register_payment_handler
 from queue_worker import start_queue_monitor
 
@@ -20,12 +21,10 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-
 logger = logging.getLogger("StartLove")
 
-
 # ─────────────────────────────────────────────
-# CREATE PYROGRAM CLIENT (POLLING MODE)
+# CREATE PYROGRAM BOT CLIENT
 # ─────────────────────────────────────────────
 def create_app() -> Client:
     return Client(
@@ -33,10 +32,9 @@ def create_app() -> Client:
         api_id=API_ID,
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
-        workers=50,        # good for buttons + messages
-        in_memory=True     # Heroku safe (no local session file)
+        workers=50,
+        in_memory=True  # safe for Heroku (no local session file)
     )
-
 
 # ─────────────────────────────────────────────
 # GRACEFUL SHUTDOWN HANDLER
@@ -44,7 +42,6 @@ def create_app() -> Client:
 def shutdown_handler(signum, frame):
     logger.warning(f"Received signal {signum}, shutting down...")
     sys.exit(0)
-
 
 # ─────────────────────────────────────────────
 # MAIN ENTRY POINT
@@ -54,27 +51,27 @@ def main():
 
     app = create_app()
 
-    # Heroku / manual stop safe
+    # Register OS signals for graceful shutdown
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
     try:
-        # Register all Telegram handlers
+        # Register handlers
         handlers.register(app)
-        register_session_handler(app)
-        register_payment_handler(app)
+        register_session_handler(app)       # multi-session pre-ban
+        register_payment_handler(app)       # payment verification
         logger.info("Handlers registered")
 
-        # Start background queue worker thread
-        core.start_worker(app)            # main pre-ban queue worker
-        start_queue_monitor(app)          # optional monitoring thread
-        logger.info("Background worker started")
+        # Start background workers
+        core.start_worker(app)              # main queue worker (pre-ban)
+        start_queue_monitor(app)            # optional monitoring thread
+        logger.info("Background workers started")
 
-        # Start bot (LONG POLLING)
+        # Start bot in polling mode
         app.start()
         logger.info("Bot started successfully (Polling mode)")
 
-        # Keep bot alive
+        # Keep bot running
         idle()
 
     except KeyboardInterrupt:
@@ -88,11 +85,12 @@ def main():
 
     finally:
         try:
+            # Stop bot gracefully
             app.stop()
             logger.info("Bot stopped gracefully")
         except Exception:
             pass
 
-
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     main()
