@@ -37,8 +37,8 @@ ACCESS_PLANS = {
 # ─────────────────────────────────────────────
 # QUEUE & WORKER SETTINGS
 # ─────────────────────────────────────────────
-QUEUE_CHECK_DELAY = 2        # seconds
-TASK_COOLDOWN = 5            # seconds between tasks
+QUEUE_CHECK_DELAY = int(os.getenv("QUEUE_CHECK_DELAY", 2))  # seconds
+TASK_COOLDOWN = int(os.getenv("TASK_COOLDOWN", 5))          # seconds between tasks
 
 # ─────────────────────────────────────────────
 # RUNTIME FLAGS
