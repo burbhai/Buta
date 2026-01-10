@@ -6,7 +6,7 @@ from pyrogram.errors import RPCError
 import handlers, core
 from session_loader import register_session_handler
 from payment_handler import register_payment_handler
-from queue_worker import start_queue_monitor
+from queue_handler import start_queue_monitor
 from config import API_ID, API_HASH, BOT_TOKEN, DEBUG
 
 logging.basicConfig(
