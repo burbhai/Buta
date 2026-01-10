@@ -1,46 +1,18 @@
 import os
 
-# ─────────────────────────────────────────────
-# TELEGRAM BOT CONFIG
-# ─────────────────────────────────────────────
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ─────────────────────────────────────────────
-# OWNER CONFIG
-# ─────────────────────────────────────────────
-# ENV format: OWNER_IDS=123456789,987654321
-OWNER_IDS = [
-    int(x.strip())
-    for x in os.getenv("OWNER_IDS", "").split(",")
-    if x.strip().isdigit()
-]
+MONGO_URI = os.getenv("MONGO_URI")
 
-# ─────────────────────────────────────────────
-# DATABASE CONFIG (MongoDB)
-# ─────────────────────────────────────────────
-MONGO_URI = os.getenv("MONGO_URI", "")
-DB_NAME = os.getenv("DB_NAME", "startlove")
+OWNER_IDS = list(map(int, os.getenv("OWNER_IDS", "").split()))
 
-# ─────────────────────────────────────────────
-# ACCESS PLANS (HOURS)
-# ─────────────────────────────────────────────
-ACCESS_PLANS = {
-    "6h": 6,
-    "12h": 12,
-    "18h": 18,
-    "24h": 24,
-    "48h": 48
+QUEUE_DELAY = int(os.getenv("QUEUE_DELAY", 3))
+TASK_COOLDOWN = int(os.getenv("TASK_COOLDOWN", 1))
+
+DEFAULT_PLANS = {
+    "6h": 6 * 60 * 60,
+    "12h": 12 * 60 * 60,
+    "24h": 24 * 60 * 60
 }
-
-# ─────────────────────────────────────────────
-# QUEUE & WORKER SETTINGS
-# ─────────────────────────────────────────────
-QUEUE_CHECK_DELAY = int(os.getenv("QUEUE_CHECK_DELAY", 2))  # seconds
-TASK_COOLDOWN = int(os.getenv("TASK_COOLDOWN", 5))          # seconds between tasks
-
-# ─────────────────────────────────────────────
-# RUNTIME FLAGS
-# ─────────────────────────────────────────────
-DEBUG = os.getenv("DEBUG", "false").lower() == "true"
