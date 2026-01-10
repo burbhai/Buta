@@ -5,15 +5,11 @@ import signal
 from pyrogram import Client, idle
 from pyrogram.errors import RPCError
 
-from config import (
-    API_ID,
-    API_HASH,
-    BOT_TOKEN,
-    DEBUG
-)
-
+from config import API_ID, API_HASH, BOT_TOKEN, DEBUG
 import handlers
 import core
+from session_handler import register_session_handler
+from payment_handler import register_payment_handler
 
 
 # ─────────────────────────────────────────────
@@ -38,7 +34,7 @@ def create_app() -> Client:
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
         workers=50,        # good for buttons + messages
-        in_memory=True    # Heroku safe (no local session file)
+        in_memory=True     # Heroku safe (no local session file)
     )
 
 
@@ -58,13 +54,15 @@ def main():
 
     app = create_app()
 
-    # Handle Heroku dyno stop / restart
+    # Heroku dyno stop / restart safe
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGINT, shutdown_handler)
 
     try:
         # Register all Telegram handlers
         handlers.register(app)
+        register_session_handler(app)
+        register_payment_handler(app)
         logger.info("Handlers registered")
 
         # Start background queue worker
