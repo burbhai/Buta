@@ -1,55 +1,41 @@
 import asyncio
-import threading
-import time
 from pyrogram import Client
-from pyrogram.errors import UserNotParticipant
-from config import API_ID, API_HASH, QUEUE_DELAY
-from db import sessions, get_setting
+from database import get_active_sessions, get_settings
+from config import Config
 
-queue = asyncio.Queue()
-lock = asyncio.Lock()
+ban_queue = asyncio.Queue()
 
-
-async def preban_user(username: str, bot):
-    session_list = list(sessions.find({"active": True}))
-    log_group = get_setting("LOG_GROUP")
-
-    for s in session_list:
-        try:
-            async with Client(
-                name="preban",
-                api_id=API_ID,
-                api_hash=API_HASH,
-                session_string=s["session"],
-                in_memory=True
-            ) as app:
-
-                dialogs = await app.get_dialogs()
-                for d in dialogs:
-                    if d.chat and d.chat.type in ["group", "supergroup", "channel"]:
-                        try:
-                            await app.ban_chat_member(d.chat.id, username)
-                        except UserNotParticipant:
-                            # Telegram supports banning even before join if admin
-                            await app.ban_chat_member(d.chat.id, username)
-
-        except Exception as e:
-            await bot.send_message(log_group, f"❌ Error with session: `{e}`")
-
-
-async def queue_worker(bot):
+async def pre_ban_worker(bot):
     while True:
-        username, user_id = await queue.get()
-        async with lock:
-            await preban_user(username, bot)
-            await bot.send_message(user_id, f"✅ `{username}` pre-banned successfully.")
-        queue.task_done()
-        await asyncio.sleep(QUEUE_DELAY)
+        target, requester_id = await ban_queue.get()
+        conf = await get_settings()
+        log_group = conf.get("log_group")
+        
+        all_sessions = await get_active_sessions()
+        success_count = 0
+        
+        for s in all_sessions:
+            try:
+                # Use in_memory to avoid creating .session files on Heroku
+                agent = Client("agent", session_string=s['string'], 
+                               api_id=Config.API_ID, api_hash=Config.API_HASH, in_memory=True)
+                await agent.start()
+                
+                async for dialog in agent.get_dialogs():
+                    if dialog.chat.type in ["group", "supergroup", "channel"]:
+                        try:
+                            # Ban target (works even if user is not in group)
+                            await agent.ban_chat_member(dialog.chat.id, target)
+                            success_count += 1
+                        except Exception:
+                            continue
+                await agent.stop()
+            except Exception:
+                continue
 
-
-def start_worker(bot):
-    loop = asyncio.get_event_loop()
-    threading.Thread(
-        target=lambda: loop.create_task(queue_worker(bot)),
-        daemon=True
-    ).start()
+        if log_group:
+            await bot.send_message(log_group, f"🛡 **Pre-Ban Done**\nTarget: `{target}`\nTotal Bans: {success_count}\nBy: `{requester_id}`")
+        
+        await bot.send_message(requester_id, f"✅ Pre-ban finished for `{target}` across {success_count} groups.")
+        ban_queue.task_done()
+        await asyncio.sleep(2) # Cooldown
