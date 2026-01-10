@@ -5,29 +5,37 @@ from config import MONGO_URI, DB_NAME
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 
-users_col = db["users"]
-payments_col = db["payments"]
+# ─────────────────────────────────────────────
+# USERS COLLECTION
+# ─────────────────────────────────────────────
+users = db["users"]
 
-# Payment request
 def create_payment_request(user_id: int, hours: int):
-    payments_col.insert_one({
-        "user_id": user_id,
-        "hours": hours,
-        "timestamp": datetime.utcnow(),
-        "approved": False
-    })
+    users.update_one(
+        {"user_id": user_id},
+        {"$set": {"pending_hours": hours, "pending": True, "created_at": datetime.utcnow()}},
+        upsert=True
+    )
 
-# Approve payment
-def approve_payment(user_id: int) -> bool:
-    doc = payments_col.find_one({"user_id": user_id, "approved": False})
-    if not doc: return False
-    payments_col.update_one({"_id": doc["_id"]}, {"$set":{"approved": True}})
-    expiry = datetime.utcnow() + timedelta(hours=doc["hours"])
-    users_col.update_one({"user_id": user_id}, {"$set":{"expiry": expiry}}, upsert=True)
+def approve_payment(user_id: int):
+    user = users.find_one({"user_id": user_id, "pending": True})
+    if not user:
+        return False
+
+    hours = user.get("pending_hours", 6)
+    expiry = datetime.utcnow() + timedelta(hours=hours)
+
+    users.update_one(
+        {"user_id": user_id},
+        {"$set": {"expiry": expiry, "pending": False}, "$unset": {"pending_hours": ""}}
+    )
     return True
 
-# Check user expiry
-def get_user_expiry(user_id: int):
-    doc = users_col.find_one({"user_id": user_id})
-    if doc: return doc.get("expiry")
-    return None
+def get_setting(key: str):
+    settings = db["settings"]
+    s = settings.find_one({"key": key})
+    return s["value"] if s else None
+
+def set_setting(key: str, value):
+    settings = db["settings"]
+    settings.update_one({"key": key}, {"$set": {"value": value}}, upsert=True)
