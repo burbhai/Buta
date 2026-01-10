@@ -1,8 +1,8 @@
 from pyrogram import filters
 from pyrogram.types import Message
-import core
-import db
 from config import OWNER_IDS
+import db
+import core
 
 # ─────────────────────────────────────────────
 # PAYMENT HANDLER
@@ -14,8 +14,8 @@ def register_payment_handler(app):
     async def payment_screenshot(client, message: Message):
         uid = message.from_user.id
 
-        # Forward to log group / admin verification
-        log_group_id = db.get_setting("log_group")
+        # Forward to log group for admin verification
+        log_group_id = core.LOG_GROUP_ID
         if log_group_id:
             caption = f"💰 Payment request from @{message.from_user.username or uid}\nUser ID: {uid}"
             try:
@@ -27,12 +27,11 @@ def register_payment_handler(app):
             except Exception:
                 pass
 
-        # Save pending payment in DB
-        db.create_payment_request(uid)
+        # Store in DB
+        db.create_payment_request(uid, hours=6)  # Default 6h, can customize per plan
 
         await message.reply(
-            "💳 Thanks! Your payment request has been received.\n"
-            "An admin will verify it shortly."
+            "💳 Payment received! Admin will verify it shortly."
         )
 
     # ─── ADMIN APPROVES PAYMENT ───────────────
@@ -59,17 +58,17 @@ def register_payment_handler(app):
             await message.reply(f"❌ No pending payment found for user {target_id}.")
             return
 
-        # Grant access for default hours or DB-stored hours
-        hours = db.get_payment_hours(target_id) or 6  # fallback 6h
-        core.grant_access(target_id, hours)
+        # Grant access in core (memory) + DB
+        db.grant_user_access(target_id, hours=6)  # Default 6h, can customize
+        core.grant_access(target_id, 6)
 
-        await message.reply(f"✅ User {target_id} approved. Access granted for {hours}h.")
+        await message.reply(f"✅ User {target_id} approved. Access granted for 6h.")
 
         # Notify user privately
         try:
             await client.send_message(
                 chat_id=target_id,
-                text=f"🎉 Your payment has been verified. Access granted for {hours}h!"
+                text=f"🎉 Payment verified. Access granted for 6h!"
             )
         except Exception:
             pass
