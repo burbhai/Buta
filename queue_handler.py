@@ -4,45 +4,54 @@ from typing import List, Tuple
 from pyrogram import Client
 
 import core
+import db
 
-# Thread lock for safety
+# ─────────────────────────────────────────────
+# THREAD LOCK & GLOBALS
+# ─────────────────────────────────────────────
 LOCK = threading.Lock()
-
-# Success counter
 SUCCESS_COUNT = 0
-
-# Completed tasks list (for admin stats)
-COMPLETED_TASKS: List[Tuple[str, float]] = []  # (username, timestamp)
+COMPLETED_TASKS: List[Tuple[str, float]] = []  # (username, time_taken)
 
 
+# ─────────────────────────────────────────────
+# QUEUE MONITOR / WORKER
+# ─────────────────────────────────────────────
 def start_queue_monitor(app: Client):
     """
-    Queue monitor thread.
-    Processes core.QUEUE, notifies user, updates SUCCESS_COUNT
+    Background queue monitor:
+    - Processes core.QUEUE
+    - Sends completion notifications
+    - Logs to admin/log group
     """
+
     def monitor():
         global SUCCESS_COUNT
 
         while True:
             try:
                 with LOCK:
-                    if not core.QUEUE or core.ACTIVE_TASK:
+                    if core.ACTIVE_TASK or not core.QUEUE:
                         time.sleep(2)
                         continue
 
+                    # Get next task
                     user_id, username = core.QUEUE.pop(0)
                     core.ACTIVE_TASK = True
 
-                # Simulate processing (replace with real logic if needed)
+                # ── START TASK ──
                 start_time = time.time()
-                time.sleep(core.TASK_COOLDOWN)  # Simulated work
+                # Multi-session pre-ban logic (simulate/replace with real method)
+                core.execute_preban(username)
                 elapsed = round(time.time() - start_time, 2)
 
-                # Increment success counter
-                SUCCESS_COUNT += 1
-                COMPLETED_TASKS.append((username, elapsed))
+                # ── UPDATE STATS ──
+                with LOCK:
+                    SUCCESS_COUNT += 1
+                    COMPLETED_TASKS.append((username, elapsed))
+                    core.ACTIVE_TASK = False
 
-                # Notify user
+                # ── NOTIFY USER ──
                 try:
                     app.send_message(
                         chat_id=user_id,
@@ -51,29 +60,32 @@ def start_queue_monitor(app: Client):
                 except Exception:
                     pass
 
-                # Optional: log group
-                if core.LOG_GROUP_ID:
+                # ── LOG TO ADMIN / LOG GROUP ──
+                log_group_id = db.get_setting("log_group") or core.LOG_GROUP_ID
+                if log_group_id:
                     try:
                         app.send_message(
-                            chat_id=core.LOG_GROUP_ID,
-                            text=f"✅ {username} handled successfully by worker\n"
+                            chat_id=log_group_id,
+                            text=f"✅ {username} handled successfully\n"
                                  f"Time taken: {elapsed} sec | Total completed: {SUCCESS_COUNT}"
                         )
                     except Exception:
                         pass
 
-                with LOCK:
-                    core.ACTIVE_TASK = False
-
             except Exception:
+                # Reset active flag on any error
                 with LOCK:
                     core.ACTIVE_TASK = False
                 time.sleep(2)
 
+    # ── START THREAD ──
     thread = threading.Thread(target=monitor, daemon=True)
     thread.start()
 
 
+# ─────────────────────────────────────────────
+# QUEUE STATUS / STATS
+# ─────────────────────────────────────────────
 def get_queue_status() -> str:
     with LOCK:
         q_len = len(core.QUEUE)
