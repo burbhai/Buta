@@ -1,7 +1,7 @@
 import os
 
 # ─────────────────────────────────────────────
-# TELEGRAM CORE CONFIG
+# TELEGRAM BOT CONFIG
 # ─────────────────────────────────────────────
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
@@ -41,11 +41,6 @@ QUEUE_CHECK_DELAY = int(os.getenv("QUEUE_CHECK_DELAY", 2))  # seconds
 TASK_COOLDOWN = int(os.getenv("TASK_COOLDOWN", 5))          # seconds between tasks
 
 # ─────────────────────────────────────────────
-# RUNTIME FLAGS
+# DEBUG
 # ─────────────────────────────────────────────
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-
-# ─────────────────────────────────────────────
-# SESSION GROUP (Dynamic, set by /set_session)
-# ─────────────────────────────────────────────
-SESSION_GROUP_ID = None
