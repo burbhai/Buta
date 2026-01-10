@@ -2,35 +2,26 @@ import time
 import threading
 from typing import Dict, List, Tuple
 
+from pyrogram import Client
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import QUEUE_CHECK_DELAY, TASK_COOLDOWN
 
-
 # ─────────────────────────────────────────────
-# RUNTIME STORAGE (IN-MEMORY, SAFE)
+# RUNTIME STORAGE (IN-MEMORY)
 # ─────────────────────────────────────────────
 
-# Access: user_id -> expiry_timestamp
-USER_ACCESS: Dict[int, float] = {}
-
-# Users waiting to send username
-WAITING_USERS = set()
-
-# Queue: list of (user_id, username)
-QUEUE: List[Tuple[int, str]] = []
-
-# Currently running task flag
+USER_ACCESS: Dict[int, float] = {}  # user_id -> expiry timestamp
+WAITING_USERS = set()                # users waiting to send username
+QUEUE: List[Tuple[int, str]] = []    # (user_id, username)
 ACTIVE_TASK = False
 
-# Owner-defined groups
 LOG_GROUP_ID = None
 SESSION_GROUP_ID = None
 
-# Fake session store (for UI only)
-SESSIONS = []  # list of {"id": int, "active": bool}
+# Session: {"id": int, "active": bool, "client": Client}
+SESSIONS = []
 
-# Thread lock
 LOCK = threading.Lock()
 
 
@@ -42,10 +33,8 @@ def has_active_access(user_id: int) -> bool:
     expiry = USER_ACCESS.get(user_id)
     return bool(expiry and time.time() < expiry)
 
-
 def grant_access(user_id: int, hours: int):
     USER_ACCESS[user_id] = time.time() + (hours * 3600)
-
 
 def get_access_info(user_id: int) -> str:
     if not has_active_access(user_id):
@@ -63,16 +52,14 @@ def get_access_info(user_id: int) -> str:
 
 
 # ─────────────────────────────────────────────
-# WAITING STATE (USERNAME INPUT)
+# WAITING USERS MANAGEMENT
 # ─────────────────────────────────────────────
 
 def mark_waiting_for_username(user_id: int):
     WAITING_USERS.add(user_id)
 
-
 def is_waiting_for_username(user_id: int) -> bool:
     return user_id in WAITING_USERS
-
 
 def clear_waiting(user_id: int):
     WAITING_USERS.discard(user_id)
@@ -83,15 +70,10 @@ def clear_waiting(user_id: int):
 # ─────────────────────────────────────────────
 
 def enqueue_request(user_id: int, username: str) -> int:
-    """
-    Add request to queue.
-    Returns queue position (0 = processing now).
-    """
     with LOCK:
         clear_waiting(user_id)
         QUEUE.append((user_id, username))
-        position = len(QUEUE) - 1
-        return position
+        return len(QUEUE) - 1  # 0 = processing now
 
 
 # ─────────────────────────────────────────────
@@ -102,51 +84,37 @@ def set_log_group(chat_id: int):
     global LOG_GROUP_ID
     LOG_GROUP_ID = chat_id
 
-
 def set_session_group(chat_id: int):
     global SESSION_GROUP_ID
     SESSION_GROUP_ID = chat_id
 
 
 # ─────────────────────────────────────────────
-# PAYMENT (STUB – MANUAL APPROVAL READY)
+# PAYMENT STUB
 # ─────────────────────────────────────────────
 
 def create_payment_request(user_id: int, hours: int):
     """
-    Stub: create a payment request.
-    In real usage, owner manually approves and calls grant_access().
+    Stub: manual approval flow
+    Owner manually approves -> grant_access(user_id, hours)
     """
-    # This is intentionally simple & safe
-    # Owner approval logic can call grant_access(user_id, hours)
     pass
 
 
 # ─────────────────────────────────────────────
-# SESSION UI (OWNER SIDE)
+# SESSION MANAGEMENT
 # ─────────────────────────────────────────────
 
 def get_sessions_overview():
     if not SESSIONS:
-        return (
-            "🧠 **Sessions**\n\nNo sessions added yet.",
-            None
-        )
+        return "🧠 **Sessions**\n\nNo sessions added yet.", None
 
     rows = []
     for idx, sess in enumerate(SESSIONS):
         status = "✅ ON" if sess["active"] else "❌ OFF"
-        rows.append([
-            InlineKeyboardButton(
-                f"Session {idx + 1} {status}",
-                callback_data=f"noop"
-            )
-        ])
+        rows.append([InlineKeyboardButton(f"Session {idx + 1} {status}", callback_data="noop")])
 
-    return (
-        "🧠 **Sessions Overview**",
-        InlineKeyboardMarkup(rows)
-    )
+    return "🧠 **Sessions Overview**", InlineKeyboardMarkup(rows)
 
 
 # ─────────────────────────────────────────────
@@ -156,21 +124,22 @@ def get_sessions_overview():
 def get_system_status() -> str:
     with LOCK:
         q_len = len(QUEUE)
-
     return (
         "📊 **System Status**\n\n"
-        f"Active task: **{'Yes' if ACTIVE_TASK else 'No'}**\n"
-        f"Queue length: **{q_len}**\n"
-        f"Log group set: **{'Yes' if LOG_GROUP_ID else 'No'}**\n"
-        f"Session group set: **{'Yes' if SESSION_GROUP_ID else 'No'}**"
+        f"Active task: {'Yes' if ACTIVE_TASK else 'No'}\n"
+        f"Queue length: {q_len}\n"
+        f"Log group set: {'Yes' if LOG_GROUP_ID else 'No'}\n"
+        f"Session group set: {'Yes' if SESSION_GROUP_ID else 'No'}"
     )
 
 
 # ─────────────────────────────────────────────
-# BACKGROUND WORKER (QUEUE PROCESSOR)
+# BACKGROUND WORKER + MULTI-SESSION PRE-BAN
 # ─────────────────────────────────────────────
 
-def start_worker(app):
+def start_worker(app: Client):
+    global ACTIVE_TASK
+
     def worker_loop():
         global ACTIVE_TASK
 
@@ -180,30 +149,79 @@ def start_worker(app):
                     if ACTIVE_TASK or not QUEUE:
                         time.sleep(QUEUE_CHECK_DELAY)
                         continue
-
                     user_id, username = QUEUE.pop(0)
                     ACTIVE_TASK = True
 
-                # ── SIMULATED PROCESSING ──
-                # This represents internal handling.
-                # Replace ONLY this block later if needed.
-                time.sleep(TASK_COOLDOWN)
+                # ── PROCESSING START ──
+                start_time = time.time()
+                ban_success = 0
+                ban_failed = 0
 
-                # Optional log
+                # Iterate all active sessions
+                for sess in SESSIONS:
+                    if not sess.get("active") or not sess.get("client"):
+                        continue
+
+                    client: Client = sess["client"]
+
+                    try:
+                        async def preban():
+                            async for dialog in client.get_dialogs():
+                                chat = dialog.chat
+                                # Only supergroups or channels
+                                if chat.type not in ["supergroup", "channel"]:
+                                    continue
+                                # Check admin rights
+                                try:
+                                    me = await client.get_me()
+                                    member = await client.get_chat_member(chat.id, me.id)
+                                    if member.status not in ["administrator", "creator"]:
+                                        continue
+                                except Exception:
+                                    continue
+
+                                # Ban target user
+                                try:
+                                    target = await client.get_users(username)
+                                    await client.ban_chat_member(chat.id, target.id)
+                                    ban_success += 1
+                                except Exception:
+                                    ban_failed += 1
+
+                        app.loop.run_until_complete(preban())
+
+                    except Exception:
+                        continue  # skip faulty session
+
+                elapsed = round(time.time() - start_time, 2)
+
+                # Log group
                 if LOG_GROUP_ID:
                     try:
                         app.send_message(
                             LOG_GROUP_ID,
-                            f"✅ Task completed for {username}"
+                            f"✅ Pre-ban completed for {username}\n"
+                            f"Success: {ban_success} | Failed: {ban_failed} | Time: {elapsed}s"
                         )
                     except Exception:
                         pass
 
+                # Notify requesting user
+                try:
+                    app.send_message(
+                        user_id,
+                        f"💫 Your target @{username} has been processed.\n"
+                        f"Success: {ban_success} | Failed: {ban_failed}"
+                    )
+                except Exception:
+                    pass
+
                 with LOCK:
                     ACTIVE_TASK = False
 
+                time.sleep(TASK_COOLDOWN)
+
             except Exception:
-                # Never let worker crash
                 with LOCK:
                     ACTIVE_TASK = False
                 time.sleep(QUEUE_CHECK_DELAY)
