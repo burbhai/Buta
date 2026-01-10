@@ -11,7 +11,7 @@ import handlers
 import core
 from session_loader import register_session_handler
 from payment_handler import register_payment_handler
-from queue_worker import start_queue_monitor
+from queue_handlers import start_queue_monitor
 
 # ─────────────────────────────────────────────
 # LOGGING CONFIGURATION
