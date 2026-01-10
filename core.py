@@ -90,7 +90,7 @@ def set_session_group(chat_id: int):
 
 def create_payment_request(user_id: int, hours: int):
     """
-    Manual approval flow
+    Manual approval flow:
     Owner approves -> call grant_access(user_id, hours)
     """
     pass
@@ -131,7 +131,7 @@ def get_system_status() -> str:
 
 def start_worker(app: Client):
     """
-    Background thread: processes QUEUE, handles multi-session pre-ban.
+    Background thread: processes QUEUE and handles multi-session pre-ban safely.
     """
     global ACTIVE_TASK
 
@@ -139,6 +139,64 @@ def start_worker(app: Client):
         global ACTIVE_TASK
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+
+        async def process_user(user_id: int, username: str):
+            ban_success = 0
+            ban_failed = 0
+            start_time = time.time()
+
+            for sess in SESSIONS:
+                if not sess.get("active") or not sess.get("client"):
+                    continue
+                client: Client = sess["client"]
+
+                try:
+                    async for dialog in client.get_dialogs():
+                        chat = dialog.chat
+                        if chat.type not in ["supergroup", "channel"]:
+                            continue
+
+                        # Check if client is admin
+                        try:
+                            me = await client.get_me()
+                            member = await client.get_chat_member(chat.id, me.id)
+                            if member.status not in ["administrator", "creator"]:
+                                continue
+                        except Exception:
+                            continue
+
+                        # Ban the target
+                        try:
+                            target = await client.get_users(username)
+                            await client.ban_chat_member(chat.id, target.id)
+                            ban_success += 1
+                        except Exception:
+                            ban_failed += 1
+                except Exception:
+                    continue
+
+            elapsed = round(time.time() - start_time, 2)
+
+            # Send log message safely
+            if LOG_GROUP_ID:
+                try:
+                    await app.send_message(
+                        LOG_GROUP_ID,
+                        f"✅ Pre-ban completed for {username}\n"
+                        f"Success: {ban_success} | Failed: {ban_failed} | Time: {elapsed}s"
+                    )
+                except Exception:
+                    pass
+
+            # Notify requesting user
+            try:
+                await app.send_message(
+                    user_id,
+                    f"💫 Your target @{username} has been processed.\n"
+                    f"Success: {ban_success} | Failed: {ban_failed}"
+                )
+            except Exception:
+                pass
 
         while True:
             try:
@@ -149,66 +207,8 @@ def start_worker(app: Client):
                     user_id, username = QUEUE.pop(0)
                     ACTIVE_TASK = True
 
-                start_time = time.time()
-                ban_success = 0
-                ban_failed = 0
-
-                async def process_user():
-                    nonlocal ban_success, ban_failed
-                    for sess in SESSIONS:
-                        if not sess.get("active") or not sess.get("client"):
-                            continue
-                        client: Client = sess["client"]
-                        try:
-                            async for dialog in client.get_dialogs():
-                                chat = dialog.chat
-                                if chat.type not in ["supergroup", "channel"]:
-                                    continue
-
-                                # Check if client is admin
-                                try:
-                                    me = await client.get_me()
-                                    member = await client.get_chat_member(chat.id, me.id)
-                                    if member.status not in ["administrator", "creator"]:
-                                        continue
-                                except Exception:
-                                    continue
-
-                                # Ban the target
-                                try:
-                                    target = await client.get_users(username)
-                                    await client.ban_chat_member(chat.id, target.id)
-                                    ban_success += 1
-                                except Exception:
-                                    ban_failed += 1
-                        except Exception:
-                            continue
-
                 # Run async pre-ban safely
-                loop.run_until_complete(process_user())
-
-                elapsed = round(time.time() - start_time, 2)
-
-                # Log group notification
-                if LOG_GROUP_ID:
-                    try:
-                        app.send_message(
-                            LOG_GROUP_ID,
-                            f"✅ Pre-ban completed for {username}\n"
-                            f"Success: {ban_success} | Failed: {ban_failed} | Time: {elapsed}s"
-                        )
-                    except Exception:
-                        pass
-
-                # Notify requesting user
-                try:
-                    app.send_message(
-                        user_id,
-                        f"💫 Your target @{username} has been processed.\n"
-                        f"Success: {ban_success} | Failed: {ban_failed}"
-                    )
-                except Exception:
-                    pass
+                loop.run_until_complete(process_user(user_id, username))
 
                 with LOCK:
                     ACTIVE_TASK = False
