@@ -1,64 +1,44 @@
 from pyrogram import filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from config import OWNER_IDS
-import core
 import db
+import core
+from config import OWNER_IDS
 
 def register_payment_handler(app):
 
-    # ─── User uploads screenshot ───────────────
+    # USER SENDS PAYMENT SCREENSHOT
     @app.on_message(filters.private & filters.photo)
     async def payment_screenshot(client, message: Message):
         uid = message.from_user.id
-
-        log_group_id = db.get_setting("log_group") or core.LOG_GROUP_ID
+        log_group_id = db.get_setting("log_group")
         if log_group_id:
             caption = f"💰 Payment request from @{message.from_user.username or uid}\nUser ID: {uid}"
-            approve_button = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("✅ Approve", callback_data=f"approve:{uid}")]]
-            )
-            try:
-                await client.send_photo(
-                    chat_id=log_group_id,
-                    photo=message.photo.file_id,
-                    caption=caption,
-                    reply_markup=approve_button
-                )
-            except Exception:
-                pass
+            await client.send_photo(chat_id=log_group_id, photo=message.photo.file_id, caption=caption)
+            # Add Approve button
+            approve_btn = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Approve", callback_data=f"approve:{uid}")]])
+            await client.send_message(chat_id=log_group_id, text="Approve user:", reply_markup=approve_btn)
+        await message.reply("💳 Payment received. Admin will verify.")
 
-        await message.reply(
-            "💳 Payment received! Admin will verify shortly."
-        )
-
-    # ─── Admin approves via button ─────────────
-    @app.on_callback_query(filters.regex(r"^approve:(\d+)$"))
-    async def approve_payment_cb(client, cb):
+    # ADMIN APPROVES VIA BUTTON
+    @app.on_callback_query(filters.regex(r"^approve:\d+$"))
+    async def approve_callback(client, cb):
         admin_id = cb.from_user.id
         if admin_id not in OWNER_IDS:
-            await cb.answer("❌ Not allowed", show_alert=True)
+            await cb.answer("Not allowed", show_alert=True)
             return
-
-        target_id = int(cb.data.split(":")[1])
-
-        # Grant access (default 6h)
-        core.grant_access(target_id, 6)
-
-        # Optional: mark in DB
-        db.mark_payment_approved(target_id, 6)
-
-        # Update log group message
-        await cb.message.edit_caption(
-            f"✅ Payment approved by @{cb.from_user.username or admin_id}\n"
-            f"Access granted: 6h"
-        )
-        await cb.answer("User approved!")
-
+        uid = int(cb.data.split(":")[1])
+        success = db.approve_payment(uid)
+        if not success:
+            await cb.answer("No pending payment for user", show_alert=True)
+            return
+        # Grant access in core
+        expiry = db.get_user_expiry(uid)
+        remaining_hours = max(1, int((expiry - db.datetime.utcnow()).total_seconds() // 3600))
+        core.grant_access(uid, remaining_hours)
+        await cb.message.edit_text(f"✅ User {uid} approved. Access granted for {remaining_hours}h")
         # Notify user privately
         try:
-            await client.send_message(
-                chat_id=target_id,
-                text="🎉 Your payment has been verified. Access granted for 6h!"
-            )
+            await client.send_message(uid, f"🎉 Your payment verified. Access granted for {remaining_hours}h!")
         except Exception:
             pass
+        await cb.answer("User approved")
