@@ -3,67 +3,88 @@ from datetime import datetime, timedelta
 from config import MONGO_URI, DB_NAME
 
 # ─────────────────────────────────────────────
-# INITIALIZE MONGO CONNECTION
+# MONGO CLIENT / DATABASE
 # ─────────────────────────────────────────────
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 
-users = db["users"]          # Stores user access and payments
-settings = db["settings"]    # Stores log group, session group, etc.
+# Collections
+users_col = db["users"]            # stores users and access info
+payments_col = db["payments"]      # stores pending payment requests
+settings_col = db["settings"]      # stores log_group, session_group, etc.
+sessions_col = db["sessions"]      # optional: active sessions
 
 # ─────────────────────────────────────────────
 # USER ACCESS MANAGEMENT
 # ─────────────────────────────────────────────
 def grant_access(user_id: int, hours: int):
-    expiry_time = datetime.utcnow() + timedelta(hours=hours)
-    users.update_one(
+    expiry = datetime.utcnow() + timedelta(hours=hours)
+    users_col.update_one(
         {"user_id": user_id},
-        {"$set": {"user_id": user_id, "expiry": expiry_time}},
+        {"$set": {"expiry": expiry}},
         upsert=True
     )
 
-def has_active_access(user_id: int) -> bool:
-    record = users.find_one({"user_id": user_id})
-    if not record or "expiry" not in record:
-        return False
-    return datetime.utcnow() < record["expiry"]
+def get_user(user_id: int):
+    return users_col.find_one({"user_id": user_id})
 
-def get_access_info(user_id: int) -> str:
-    record = users.find_one({"user_id": user_id})
-    if not record or "expiry" not in record:
-        return "💔 You don’t have any active access."
-    remaining = record["expiry"] - datetime.utcnow()
-    hrs = remaining.seconds // 3600
-    mins = (remaining.seconds % 3600) // 60
-    return f"💼 Access remaining: {hrs}h {mins}m"
+def has_active_access(user_id: int) -> bool:
+    user = get_user(user_id)
+    if not user or "expiry" not in user:
+        return False
+    return datetime.utcnow() < user["expiry"]
 
 # ─────────────────────────────────────────────
 # PAYMENT MANAGEMENT
 # ─────────────────────────────────────────────
-def create_payment_request(user_id: int, hours: int):
-    users.update_one(
+def create_payment(user_id: int, hours: int):
+    """Add a pending payment request"""
+    payments_col.update_one(
         {"user_id": user_id},
-        {"$set": {"pending_payment": True, "requested_hours": hours, "timestamp": datetime.utcnow()}},
+        {"$set": {"hours": hours, "created_at": datetime.utcnow(), "status": "pending"}},
         upsert=True
     )
 
+def get_pending_payment(user_id: int):
+    return payments_col.find_one({"user_id": user_id, "status": "pending"})
+
 def approve_payment(user_id: int) -> bool:
-    record = users.find_one({"user_id": user_id})
-    if not record or not record.get("pending_payment"):
+    """Mark payment as approved"""
+    payment = get_pending_payment(user_id)
+    if not payment:
         return False
-    hours = record.get("requested_hours", 6)
-    grant_access(user_id, hours)
-    users.update_one({"user_id": user_id}, {"$unset": {"pending_payment": "", "requested_hours": ""}})
+    payments_col.update_one({"user_id": user_id}, {"$set": {"status": "approved"}})
+    grant_access(user_id, payment.get("hours", 6))
     return True
 
 # ─────────────────────────────────────────────
-# SETTINGS MANAGEMENT (LOG GROUP, SESSION GROUP)
+# SETTINGS (LOG GROUP, SESSION GROUP)
 # ─────────────────────────────────────────────
 def set_setting(key: str, value):
-    settings.update_one({"key": key}, {"$set": {"value": value}}, upsert=True)
+    settings_col.update_one({"key": key}, {"$set": {"value": value}}, upsert=True)
 
 def get_setting(key: str):
-    record = settings.find_one({"key": key})
-    if record:
-        return record.get("value")
-    return None
+    setting = settings_col.find_one({"key": key})
+    return setting["value"] if setting else None
+
+def set_log_group(chat_id: int):
+    set_setting("log_group", chat_id)
+
+def set_session_group(chat_id: int):
+    set_setting("session_group", chat_id)
+
+# ─────────────────────────────────────────────
+# SESSION MANAGEMENT (OPTIONAL)
+# ─────────────────────────────────────────────
+def add_session(session_id: int, session_string: str, active=True):
+    sessions_col.update_one(
+        {"session_id": session_id},
+        {"$set": {"session_string": session_string, "active": active}},
+        upsert=True
+    )
+
+def get_sessions():
+    return list(sessions_col.find())
+
+def toggle_session(session_id: int, active: bool):
+    sessions_col.update_one({"session_id": session_id}, {"$set": {"active": active}})
