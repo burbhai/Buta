@@ -1,6 +1,6 @@
 import asyncio
 from pyrogram import Client
-from database import get_active_sessions, get_settings
+from db import get_active_sessions, get_settings
 from config import Config
 
 ban_queue = asyncio.Queue()
