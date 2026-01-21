@@ -47,14 +47,21 @@ async def preban_user(bot, message):
         return
 
     raw_target = message.command[1].lstrip("@")
-    try:
-        if raw_target.isdigit():
-            target_user = await bot.get_users(int(raw_target))
-        else:
+    target_id = None
+    target_username = None
+    if raw_target.isdigit():
+        target_id = int(raw_target)
+    else:
+        try:
             target_user = await bot.get_users(raw_target)
-    except RPCError as exc:
-        await message.reply(f"❌ Failed to resolve user: {exc}")
+            target_id = target_user.id
+        except RPCError:
+            target_username = raw_target
+
+    if target_id is None and target_username is None:
+        await message.reply("❌ Failed to resolve user.")
         return
 
-    await ban_queue.put((target_user.id, message.from_user.id))
-    await message.reply(f"🕒 Added `{target_user.id}` to pre-ban queue.")
+    await ban_queue.put(({"id": target_id, "username": target_username}, message.from_user.id))
+    queued_label = target_id if target_id is not None else f"@{target_username}"
+    await message.reply(f"🕒 Added `{queued_label}` to pre-ban queue.")
