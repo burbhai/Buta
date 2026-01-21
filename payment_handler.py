@@ -4,6 +4,8 @@ from config import Config
 
 @Client.on_message(filters.photo & filters.private)
 async def handle_payment_screenshot(bot, message):
+    if not message.from_user:
+        return
     conf = await get_settings()
     log_group = conf.get("log_group")
     
@@ -20,7 +22,7 @@ async def handle_payment_screenshot(bot, message):
     await bot.send_message(log_group, f"💳 **New Payment** from `{message.from_user.id}`", reply_markup=kb)
     await message.reply("🕒 Screenshot sent. Wait for admin approval.")
 
-@Client.on_callback_query(filters.regex(r"app_(\d+)_(\d+)"))
+@Client.on_callback_query(filters.regex(r"app_(\d+)_(\d+)") & filters.user(Config.OWNERS))
 async def approve_user(bot, cb):
     _, uid, hours = cb.data.split("_")
     await give_access(int(uid), int(hours))

@@ -3,7 +3,7 @@ from config import Config
 from datetime import datetime, timedelta
 
 client = AsyncIOMotorClient(Config.MONGO_URI)
-db = client.preban_db
+db = client[Config.DB_NAME]
 
 # Collections
 users = db.users

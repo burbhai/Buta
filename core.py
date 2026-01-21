@@ -13,6 +13,8 @@ from db import get_active_sessions, get_settings
 from config import Config
 
 ban_queue: "asyncio.Queue[Tuple[Any, int]]" = asyncio.Queue()
+QUEUE: List[Tuple[int, str]] = []
+ACTIVE_TASK = False
 
 
 # -----------------------------
