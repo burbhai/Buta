@@ -44,6 +44,8 @@ class Config:
     COMMAND_PREFIXES = [p for p in re.split(r"[,\s]+", _prefix_raw.strip()) if p]
     if not COMMAND_PREFIXES:
         COMMAND_PREFIXES = ["/"]
+    elif "/" not in COMMAND_PREFIXES:
+        COMMAND_PREFIXES = ["/", *COMMAND_PREFIXES]
 
     @classmethod
     def validate(cls) -> None:
