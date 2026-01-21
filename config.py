@@ -40,6 +40,10 @@ class Config:
     PREBAN_WORKERS = _parse_int_env("PREBAN_WORKERS", 2)
     SESSION_CONCURRENCY = _parse_int_env("SESSION_CONCURRENCY", 3)
     QUEUE_MAXSIZE = _parse_int_env("QUEUE_MAXSIZE", 0)
+    _prefix_raw = os.getenv("COMMAND_PREFIXES", "/ ! .")
+    COMMAND_PREFIXES = [p for p in re.split(r"[,\s]+", _prefix_raw.strip()) if p]
+    if not COMMAND_PREFIXES:
+        COMMAND_PREFIXES = ["/"]
 
     @classmethod
     def validate(cls) -> None:
