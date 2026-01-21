@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 from pyrogram import Client, filters, types
 from pyrogram.errors import FloodWait, RPCError
 
-from bot_instance import bot
+from bot_instance import get_bot
 from config import Config
 from core import ban_queue, get_worker_status
 from db import (
@@ -24,6 +24,7 @@ from db import (
 )
 from queue_handler import get_queue_snapshot, get_queue_status
 
+bot = get_bot()
 LOVE_TRACKER = {}
 LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ async def _safe_reply(message: types.Message, text: str, reply_markup: Optional[
         await message.reply(text, reply_markup=reply_markup)
     except Exception:
         LOGGER.exception("Failed to reply to message.")
+        try:
+            await message._client.send_message(message.chat.id, text, reply_markup=reply_markup)
+        except Exception:
+            LOGGER.exception("Failed to send fallback reply.")
 
 
 async def _safe_edit(cb: types.CallbackQuery, text: str, reply_markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
@@ -44,6 +49,10 @@ async def _safe_edit(cb: types.CallbackQuery, text: str, reply_markup: Optional[
             await cb.message.reply(text, reply_markup=reply_markup)
         except Exception:
             LOGGER.exception("Failed to send fallback reply.")
+            try:
+                await cb.message._client.send_message(cb.message.chat.id, text, reply_markup=reply_markup)
+            except Exception:
+                LOGGER.exception("Failed to send fallback fallback reply.")
 
 
 async def _answer_cb(
@@ -175,32 +184,6 @@ def _dm_only_message() -> str:
             "health",
         ]
     )
-    & filters.group
-)
-async def group_command_redirect(bot, message):
-    try:
-        await _safe_reply(message, _dm_only_message())
-    except Exception:
-        LOGGER.exception("Group redirect handler failed.")
-
-
-@bot.on_message(
-    filters.command(
-        [
-            "start",
-            "preban",
-            "status",
-            "addsession",
-            "addsudo",
-            "remsudo",
-            "verify",
-            "verify_delay",
-            "manage",
-            "set_log",
-            "set_session",
-            "health",
-        ]
-    )
     & filters.channel
 )
 async def channel_command_redirect(bot, message):
@@ -209,7 +192,7 @@ async def channel_command_redirect(bot, message):
     except Exception:
         LOGGER.exception("Channel redirect handler failed.")
 
-@bot.on_message(filters.command("start") & filters.private)
+@bot.on_message(filters.command("start") & (filters.private | filters.group))
 async def start(bot, message):
     try:
         if not message.from_user:
@@ -482,7 +465,7 @@ async def owner_set_session_cb(bot, cb):
         LOGGER.exception("Owner set session handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_message(filters.command("set_log") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("set_log") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def set_log_group(bot, message):
     try:
         await update_setting("log_group", message.chat.id)
@@ -491,7 +474,7 @@ async def set_log_group(bot, message):
         LOGGER.exception("Set log command failed.")
         await _safe_reply(message, "❌ Failed to set log group.")
 
-@bot.on_message(filters.command("set_session") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("set_session") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def set_session_group(bot, message):
     try:
         await update_setting("session_group", message.chat.id)
@@ -500,7 +483,7 @@ async def set_session_group(bot, message):
         LOGGER.exception("Set session command failed.")
         await _safe_reply(message, "❌ Failed to set session group.")
 
-@bot.on_message(filters.command("manage") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("manage") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def manage_sessions(bot, message):
     try:
         all_s = await get_active_sessions()
@@ -580,7 +563,7 @@ async def handle_text_messages(bot, message):
         LOGGER.exception("Handle text handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
 
-@bot.on_message(filters.command("preban") & filters.private)
+@bot.on_message(filters.command("preban") & (filters.private | filters.group))
 async def preban_user(bot, message):
     try:
         if not message.from_user:
@@ -613,7 +596,7 @@ async def preban_user(bot, message):
         await _safe_reply(message, "❌ Failed to queue pre-ban request.")
 
 
-@bot.on_message(filters.command("status") & filters.private)
+@bot.on_message(filters.command("status") & (filters.private | filters.group))
 async def status_command(bot, message):
     try:
         if not message.from_user:
@@ -630,7 +613,7 @@ async def status_command(bot, message):
         await _safe_reply(message, "❌ Failed to get queue status.")
 
 
-@bot.on_message(filters.command("health") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("health") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def health_command(bot, message):
     try:
         db_ok = await check_db_health()
@@ -652,7 +635,7 @@ async def health_command(bot, message):
         await _safe_reply(message, "❌ Failed to collect health status.")
 
 
-@bot.on_message(filters.command("addsession") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("addsession") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def add_session_command(bot, message):
     try:
         if len(message.command) < 2:
@@ -664,7 +647,6 @@ async def add_session_command(bot, message):
             session_string=session_string,
             api_id=Config.API_ID,
             api_hash=Config.API_HASH,
-            in_memory=True,
         )
         started = False
         try:
@@ -681,7 +663,7 @@ async def add_session_command(bot, message):
         await _safe_reply(message, "❌ Failed to add session.")
 
 
-@bot.on_message(filters.command("addsudo") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("addsudo") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def add_sudo_command(bot, message):
     try:
         if len(message.command) < 2:
@@ -698,7 +680,7 @@ async def add_sudo_command(bot, message):
         await _safe_reply(message, "❌ Failed to add sudo user.")
 
 
-@bot.on_message(filters.command("remsudo") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("remsudo") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def remove_sudo_command(bot, message):
     try:
         if len(message.command) < 2:
@@ -715,7 +697,7 @@ async def remove_sudo_command(bot, message):
         await _safe_reply(message, "❌ Failed to remove sudo user.")
 
 
-@bot.on_message(filters.command("verify") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("verify") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def set_verify_mode(bot, message):
     try:
         if len(message.command) < 2:
@@ -732,7 +714,7 @@ async def set_verify_mode(bot, message):
         await _safe_reply(message, "❌ Failed to update verification mode.")
 
 
-@bot.on_message(filters.command("verify_delay") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("verify_delay") & filters.user(Config.OWNERS) & (filters.private | filters.group))
 async def set_verify_delay(bot, message):
     try:
         if len(message.command) < 2:
