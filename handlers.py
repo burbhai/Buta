@@ -1,10 +1,12 @@
-from pyrogram import Client, filters, types
+from pyrogram import filters, types
+
+from bot_instance import bot
 from pyrogram.errors import RPCError
 from db import update_setting, get_active_sessions, deactivate_session, has_access
 from config import Config
 from core import ban_queue
 
-@Client.on_message(filters.command("start") & filters.private)
+@bot.on_message(filters.command("start") & filters.private)
 async def start(bot, message):
     if not message.from_user:
         return
@@ -20,17 +22,17 @@ async def start(bot, message):
         f"{access_note}"
     )
 
-@Client.on_message(filters.command("set_log") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("set_log") & filters.user(Config.OWNERS))
 async def set_log_group(bot, message):
     await update_setting("log_group", message.chat.id)
     await message.reply("✅ This group is now the **Log Group**.")
 
-@Client.on_message(filters.command("set_session") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("set_session") & filters.user(Config.OWNERS))
 async def set_session_group(bot, message):
     await update_setting("session_group", message.chat.id)
     await message.reply("✅ This group is now the **Session Validation Group**.")
 
-@Client.on_message(filters.command("manage") & filters.user(Config.OWNERS))
+@bot.on_message(filters.command("manage") & filters.user(Config.OWNERS))
 async def manage_sessions(bot, message):
     all_s = await get_active_sessions()
     text = f"📑 **Active Sessions ({len(all_s)}):**\n\n"
@@ -41,14 +43,14 @@ async def manage_sessions(bot, message):
     
     await message.reply(text, reply_markup=types.InlineKeyboardMarkup(kb))
 
-@Client.on_callback_query(filters.regex(r"^rem_(.+)$") & filters.user(Config.OWNERS))
+@bot.on_callback_query(filters.regex(r"^rem_(.+)$") & filters.user(Config.OWNERS))
 async def remove_session(bot, cb):
     phone = cb.matches[0].group(1)
     await deactivate_session(phone)
     await cb.answer("Session removed.", show_alert=True)
     await cb.edit_message_text(f"✅ Removed session for {phone}.")
 
-@Client.on_message(filters.command("preban") & filters.private)
+@bot.on_message(filters.command("preban") & filters.private)
 async def preban_user(bot, message):
     if not message.from_user:
         return
