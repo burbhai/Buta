@@ -5,28 +5,56 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from config import Config
 
 LOGGER = logging.getLogger(__name__)
 
-client = AsyncIOMotorClient(Config.MONGO_URI)
-db = client[Config.DB_NAME]
+_client: Optional[AsyncIOMotorClient] = None
+_db: Optional[AsyncIOMotorDatabase] = None
 
-# Collections
-users = db.users
-sessions = db.sessions
-settings = db.settings
-user_cache = db.user_cache
+
+def _get_client() -> AsyncIOMotorClient:
+    global _client
+    if _client is None:
+        if not Config.MONGO_URI:
+            LOGGER.error("MongoDB URI is not configured.")
+            raise RuntimeError("Missing MONGO_URI.")
+        _client = AsyncIOMotorClient(Config.MONGO_URI)
+    return _client
+
+
+def _get_db() -> AsyncIOMotorDatabase:
+    global _db
+    if _db is None:
+        _db = _get_client()[Config.DB_NAME]
+    return _db
+
+
+def _users():
+    return _get_db().users
+
+
+def _sessions():
+    return _get_db().sessions
+
+
+def _settings():
+    return _get_db().settings
+
+
+def _user_cache():
+    return _get_db().user_cache
 
 
 async def ensure_indexes() -> None:
     """Ensure MongoDB indexes needed for bot queries."""
     try:
-        await sessions.create_index("active")
-        await user_cache.create_index("username_norm")
-        await user_cache.create_index("user_id")
-        await users.create_index("expiry")
+        await _sessions().create_index("active")
+        await _user_cache().create_index("username_norm")
+        await _user_cache().create_index("user_id")
+        await _users().create_index("expiry")
     except Exception:
         LOGGER.exception("Failed to create MongoDB indexes.")
 
@@ -34,7 +62,7 @@ async def ensure_indexes() -> None:
 async def check_db_health() -> bool:
     """Ping MongoDB to confirm connectivity at startup."""
     try:
-        await client.admin.command("ping")
+        await _get_client().admin.command("ping")
         LOGGER.info("MongoDB connectivity check: OK.")
         return True
     except Exception:
@@ -43,15 +71,15 @@ async def check_db_health() -> bool:
 
 async def get_settings() -> Dict[str, Any]:
     """Return bot settings document."""
-    return await settings.find_one({"id": "bot_config"}) or {}
+    return await _settings().find_one({"id": "bot_config"}) or {}
 
 async def update_setting(key: str, value: Any) -> None:
     """Update a single settings key."""
-    await settings.update_one({"id": "bot_config"}, {"$set": {key: value}}, upsert=True)
+    await _settings().update_one({"id": "bot_config"}, {"$set": {key: value}}, upsert=True)
 
 async def add_session(session_str: str, name: str, phone: str) -> None:
     """Add or update a user session."""
-    await sessions.update_one(
+    await _sessions().update_one(
         {"phone": phone},
         {"$set": {"string": session_str, "name": name, "phone": phone, "active": True}},
         upsert=True,
@@ -59,31 +87,31 @@ async def add_session(session_str: str, name: str, phone: str) -> None:
 
 async def get_active_sessions() -> list[Dict[str, Any]]:
     """Return active sessions."""
-    return await sessions.find({"active": True}).to_list(length=None)
+    return await _sessions().find({"active": True}).to_list(length=None)
 
 async def deactivate_session(phone: str) -> None:
     """Deactivate a session by phone."""
-    await sessions.update_one({"phone": phone}, {"$set": {"active": False}})
+    await _sessions().update_one({"phone": phone}, {"$set": {"active": False}})
 
 async def give_access(user_id: int, hours: int) -> None:
     """Grant sudo access for a number of hours."""
     expiry = datetime.utcnow() + timedelta(hours=hours)
-    await users.update_one({"user_id": user_id}, {"$set": {"expiry": expiry}}, upsert=True)
+    await _users().update_one({"user_id": user_id}, {"$set": {"expiry": expiry}}, upsert=True)
 
 async def revoke_access(user_id: int) -> None:
     """Revoke sudo access immediately."""
-    await users.update_one({"user_id": user_id}, {"$set": {"expiry": datetime.utcnow()}}, upsert=True)
+    await _users().update_one({"user_id": user_id}, {"$set": {"expiry": datetime.utcnow()}}, upsert=True)
 
 async def get_active_sudo_users() -> list[Dict[str, Any]]:
     """Return users with active sudo access."""
     now = datetime.utcnow()
-    cursor = users.find({"expiry": {"$gt": now}})
+    cursor = _users().find({"expiry": {"$gt": now}})
     return await cursor.to_list(length=None)
 
 async def has_access(user_id: int) -> bool:
     """Check if the user has active sudo access."""
     try:
-        user = await users.find_one({"user_id": user_id})
+        user = await _users().find_one({"user_id": user_id})
     except Exception:
         return False
     if not user:
@@ -112,7 +140,7 @@ async def get_user_cache(*, user_id: Optional[int] = None, username: Optional[st
         query = {"user_id": int(user_id)}
     else:
         query = {"username_norm": normalized_username}
-    return await user_cache.find_one(query)
+    return await _user_cache().find_one(query)
 
 
 async def upsert_user_cache(user: Dict[str, Any]) -> None:
@@ -125,7 +153,7 @@ async def upsert_user_cache(user: Dict[str, Any]) -> None:
         "username_norm": normalized_username,
         "updated_at": int(user.get("updated_at") or datetime.utcnow().timestamp()),
     }
-    await user_cache.update_one(
+    await _user_cache().update_one(
         {"user_id": payload["user_id"]},
         {"$set": payload},
         upsert=True,

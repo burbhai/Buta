@@ -63,6 +63,17 @@ async def get_queue_status() -> str:
     return f"📊 Queue: {'Yes' if active else 'No'} | {q_len} items | Total done: {done}"
 
 
+async def get_queue_snapshot() -> dict:
+    """Return queue metrics for health checks."""
+    async with LOCK:
+        return {
+            "queue_length": QUEUE_LENGTH,
+            "active_tasks": ACTIVE_TASKS,
+            "success_count": SUCCESS_COUNT,
+            "completed_samples": len(COMPLETED_TASKS),
+        }
+
+
 async def get_completed_tasks_summary() -> str:
     """Return a summary of recently completed tasks."""
     async with LOCK:
