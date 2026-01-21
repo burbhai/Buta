@@ -137,6 +137,35 @@ def _owner_action_keyboard(action: str) -> types.InlineKeyboardMarkup:
         ]
     )
 
+
+def _dm_only_message() -> str:
+    return "⚠️ This feature is available in private chat. Please DM the bot."
+
+
+@bot.on_message(
+    filters.command(
+        [
+            "start",
+            "preban",
+            "status",
+            "addsession",
+            "addsudo",
+            "remsudo",
+            "verify",
+            "verify_delay",
+            "manage",
+            "set_log",
+            "set_session",
+        ]
+    )
+    & filters.group
+)
+async def group_command_redirect(bot, message):
+    try:
+        await _safe_reply(message, _dm_only_message())
+    except Exception:
+        LOGGER.exception("Group redirect handler failed.")
+
 @bot.on_message(filters.command("start") & filters.private)
 async def start(bot, message):
     try:

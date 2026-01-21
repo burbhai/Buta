@@ -1,5 +1,23 @@
+from __future__ import annotations
+
+import logging
 import os
 import re
+from typing import List, Tuple
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _parse_owner_ids(raw: str) -> Tuple[List[int], List[str]]:
+    tokens = [x for x in re.split(r"[,\s]+", raw.strip()) if x]
+    owners: List[int] = []
+    invalid: List[str] = []
+    for token in tokens:
+        if token.isdigit():
+            owners.append(int(token))
+        else:
+            invalid.append(token)
+    return owners, invalid
 
 
 class Config:
@@ -7,6 +25,27 @@ class Config:
     API_HASH = os.getenv("API_HASH", "")
     BOT_TOKEN = os.getenv("BOT_TOKEN", "")
     _owner_raw = os.getenv("OWNER_IDS", "")
-    OWNERS = [int(x) for x in re.split(r"[,\s]+", _owner_raw.strip()) if x]
+    OWNERS, _OWNER_INVALID = _parse_owner_ids(_owner_raw)
     MONGO_URI = os.getenv("MONGO_URI", "")
     DB_NAME = os.getenv("DB_NAME", "preban_db")
+
+    @classmethod
+    def validate(cls) -> None:
+        errors: List[str] = []
+        if not isinstance(cls.API_ID, int) or cls.API_ID <= 0:
+            errors.append("API_ID must be a valid integer greater than 0.")
+        if not cls.API_HASH:
+            errors.append("API_HASH is required and cannot be empty.")
+        if not cls.BOT_TOKEN or not re.match(r"^\d+:[\w-]{20,}$", cls.BOT_TOKEN):
+            errors.append("BOT_TOKEN is required and must look like '123456:ABC...'.")
+        if cls._OWNER_INVALID:
+            errors.append(f"OWNER_IDS contains invalid values: {', '.join(cls._OWNER_INVALID)}.")
+        if not cls.OWNERS:
+            errors.append("OWNER_IDS must contain at least one numeric Telegram user ID.")
+        if not cls.MONGO_URI or not re.match(r"^mongodb(\+srv)?://", cls.MONGO_URI):
+            errors.append("MONGO_URI must be a valid MongoDB connection string.")
+
+        if errors:
+            for err in errors:
+                LOGGER.error("Config validation error: %s", err)
+            raise SystemExit(1)

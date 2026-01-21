@@ -42,12 +42,13 @@ async def mark_task_started(label: str) -> None:
         ACTIVE_TASKS += 1
 
 
-async def mark_task_completed(label: str, elapsed: float) -> None:
+async def mark_task_completed(label: str, elapsed: float, *, success: bool = True) -> None:
     """Mark a queue task as completed with elapsed time."""
     global ACTIVE_TASKS, SUCCESS_COUNT
     async with LOCK:
         ACTIVE_TASKS = max(0, ACTIVE_TASKS - 1)
-        SUCCESS_COUNT += 1
+        if success:
+            SUCCESS_COUNT += 1
         COMPLETED_TASKS.append((label, round(elapsed, 2)))
         if len(COMPLETED_TASKS) > 50:
             COMPLETED_TASKS.pop(0)
