@@ -40,10 +40,15 @@ COMMANDS = [
     "set_session",
     "health",
 ]
+COMMAND_PREFIXES = Config.COMMAND_PREFIXES
 GROUP_FILTER = filters.group
 if hasattr(filters, "supergroup"):
     GROUP_FILTER |= filters.supergroup
 ANON_COMMAND_MESSAGE = "⚠️ Disable anonymous admin / send command in DM."
+
+
+def command_filter(commands):
+    return filters.command(commands, prefixes=COMMAND_PREFIXES)
 
 
 async def _safe_reply(message: types.Message, text: str, reply_markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
@@ -205,19 +210,19 @@ def _dm_only_message() -> str:
     return "⚠️ This feature is available in private chat. Please DM the bot."
 
 
-@bot.on_message(filters.command(COMMANDS))
+@bot.on_message(command_filter(COMMANDS))
 async def log_commands(bot, message):
     _log_command_update(message)
 
 
-@bot.on_message(filters.command(COMMANDS) & GROUP_FILTER)
+@bot.on_message(command_filter(COMMANDS) & GROUP_FILTER)
 async def reject_anonymous_group_commands(bot, message):
     if await _reject_anonymous_command(message):
         return
 
 
 @bot.on_message(
-    filters.command(
+    command_filter(
         [
             "start",
             "preban",
@@ -243,7 +248,7 @@ async def channel_command_redirect(bot, message):
     except Exception:
         LOGGER.exception("Channel redirect handler failed.")
 
-@bot.on_message(filters.command("start") & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("start") & (filters.private | GROUP_FILTER))
 async def start(bot, message):
     try:
         if await _reject_anonymous_command(message):
@@ -516,7 +521,7 @@ async def owner_set_session_cb(bot, cb):
         LOGGER.exception("Owner set session handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_message(filters.command("set_log") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("set_log") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def set_log_group(bot, message):
     try:
         await update_setting("log_group", message.chat.id)
@@ -525,7 +530,7 @@ async def set_log_group(bot, message):
         LOGGER.exception("Set log command failed.")
         await _safe_reply(message, "❌ Failed to set log group.")
 
-@bot.on_message(filters.command("set_session") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("set_session") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def set_session_group(bot, message):
     try:
         await update_setting("session_group", message.chat.id)
@@ -534,7 +539,7 @@ async def set_session_group(bot, message):
         LOGGER.exception("Set session command failed.")
         await _safe_reply(message, "❌ Failed to set session group.")
 
-@bot.on_message(filters.command("manage") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("manage") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def manage_sessions(bot, message):
     try:
         all_s = await get_active_sessions()
@@ -614,7 +619,7 @@ async def handle_text_messages(bot, message):
         LOGGER.exception("Handle text handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
 
-@bot.on_message(filters.command("preban") & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("preban") & (filters.private | GROUP_FILTER))
 async def preban_user(bot, message):
     try:
         if await _reject_anonymous_command(message):
@@ -647,7 +652,7 @@ async def preban_user(bot, message):
         await _safe_reply(message, "❌ Failed to queue pre-ban request.")
 
 
-@bot.on_message(filters.command("status") & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("status") & (filters.private | GROUP_FILTER))
 async def status_command(bot, message):
     try:
         if await _reject_anonymous_command(message):
@@ -664,7 +669,7 @@ async def status_command(bot, message):
         await _safe_reply(message, "❌ Failed to get queue status.")
 
 
-@bot.on_message(filters.command("health") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("health") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def health_command(bot, message):
     try:
         db_ok = await check_db_health()
@@ -686,7 +691,7 @@ async def health_command(bot, message):
         await _safe_reply(message, "❌ Failed to collect health status.")
 
 
-@bot.on_message(filters.command("addsession") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("addsession") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def add_session_command(bot, message):
     try:
         if len(message.command) < 2:
@@ -714,7 +719,7 @@ async def add_session_command(bot, message):
         await _safe_reply(message, "❌ Failed to add session.")
 
 
-@bot.on_message(filters.command("addsudo") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("addsudo") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def add_sudo_command(bot, message):
     try:
         if len(message.command) < 2:
@@ -731,7 +736,7 @@ async def add_sudo_command(bot, message):
         await _safe_reply(message, "❌ Failed to add sudo user.")
 
 
-@bot.on_message(filters.command("remsudo") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("remsudo") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def remove_sudo_command(bot, message):
     try:
         if len(message.command) < 2:
@@ -748,7 +753,7 @@ async def remove_sudo_command(bot, message):
         await _safe_reply(message, "❌ Failed to remove sudo user.")
 
 
-@bot.on_message(filters.command("verify") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("verify") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def set_verify_mode(bot, message):
     try:
         if len(message.command) < 2:
@@ -765,7 +770,7 @@ async def set_verify_mode(bot, message):
         await _safe_reply(message, "❌ Failed to update verification mode.")
 
 
-@bot.on_message(filters.command("verify_delay") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("verify_delay") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
 async def set_verify_delay(bot, message):
     try:
         if len(message.command) < 2:
