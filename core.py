@@ -7,7 +7,7 @@ ban_queue = asyncio.Queue()
 
 async def pre_ban_worker(bot):
     while True:
-        target, requester_id = await ban_queue.get()
+        target_info, requester_id = await ban_queue.get()
         conf = await get_settings()
         log_group = conf.get("log_group")
         
@@ -16,6 +16,14 @@ async def pre_ban_worker(bot):
         attempt_count = 0
         session_count = 0
         
+        target_id = None
+        target_username = None
+        if isinstance(target_info, dict):
+            target_id = target_info.get("id")
+            target_username = target_info.get("username")
+        else:
+            target_id = target_info
+
         for s in all_sessions:
             try:
                 # Use in_memory to avoid creating .session files on Heroku
@@ -28,8 +36,20 @@ async def pre_ban_worker(bot):
                 )
                 await agent.start()
                 session_count += 1
+                resolved_id = target_id
+                if resolved_id is None and target_username:
+                    try:
+                        resolved = await agent.get_users(target_username)
+                        resolved_id = resolved.id
+                    except Exception:
+                        await agent.stop()
+                        continue
+                if resolved_id is None:
+                    await agent.stop()
+                    continue
                 try:
-                    await agent.get_users(target)
+                    if resolved_id is not None:
+                        await agent.get_users(resolved_id)
                 except Exception:
                     pass
 
@@ -49,7 +69,7 @@ async def pre_ban_worker(bot):
                     attempt_count += 1
                     try:
                         # Ban target (works even if user is not in group)
-                        await agent.ban_chat_member(dialog.chat.id, target)
+                        await agent.ban_chat_member(dialog.chat.id, resolved_id)
                         success_count += 1
                     except Exception:
                         continue
@@ -61,7 +81,7 @@ async def pre_ban_worker(bot):
             await bot.send_message(
                 log_group,
                 "🛡 **Pre-Ban Done**"
-                f"\nTarget: `{target}`"
+                f"\nTarget: `{target_id if target_id is not None else target_username}`"
                 f"\nSessions Used: {session_count}"
                 f"\nAttempts: {attempt_count}"
                 f"\nTotal Bans: {success_count}"
@@ -71,7 +91,7 @@ async def pre_ban_worker(bot):
         await bot.send_message(
             requester_id,
             "✅ Pre-ban finished"
-            f"\nTarget: `{target}`"
+            f"\nTarget: `{target_id if target_id is not None else target_username}`"
             f"\nSessions Used: {session_count}"
             f"\nAttempts: {attempt_count}"
             f"\nTotal Bans: {success_count}",
