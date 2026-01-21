@@ -1,9 +1,44 @@
 import asyncio
-from pyrogram import Client
+from pyrogram import Client, enums
+from pyrogram.errors import PeerIdInvalid, RPCError
 from db import get_active_sessions, get_settings
 from config import Config
 
 ban_queue = asyncio.Queue()
+
+async def ensure_entity(agent, target_id, target_username):
+    resolved_id = target_id
+    resolved_username = target_username
+    if resolved_username:
+        try:
+            user = await agent.get_users(resolved_username)
+            return user.id, user.username or resolved_username
+        except RPCError:
+            pass
+    if resolved_id is None:
+        return resolved_id, resolved_username
+    try:
+        user = await agent.get_users(resolved_id)
+        return user.id, user.username or resolved_username
+    except PeerIdInvalid:
+        if resolved_username:
+            user = await agent.get_users(resolved_username)
+            return user.id, user.username or resolved_username
+    except RPCError:
+        pass
+    return resolved_id, resolved_username
+
+async def is_user_banned(agent, chat_id, target_id):
+    try:
+        async for member in agent.get_chat_members(
+            chat_id,
+            filter=enums.ChatMembersFilter.BANNED,
+        ):
+            if member.user and member.user.id == target_id:
+                return True
+    except RPCError:
+        return False
+    return False
 
 async def pre_ban_worker(bot):
     while True:
@@ -36,22 +71,14 @@ async def pre_ban_worker(bot):
                 )
                 await agent.start()
                 session_count += 1
-                resolved_id = target_id
-                if resolved_id is None and target_username:
-                    try:
-                        resolved = await agent.get_users(target_username)
-                        resolved_id = resolved.id
-                    except Exception:
-                        await agent.stop()
-                        continue
+                resolved_id, resolved_username = await ensure_entity(
+                    agent,
+                    target_id,
+                    target_username,
+                )
                 if resolved_id is None:
                     await agent.stop()
                     continue
-                try:
-                    if resolved_id is not None:
-                        await agent.get_users(resolved_id)
-                except Exception:
-                    pass
 
                 async for dialog in agent.get_dialogs():
                     if dialog.chat.type not in ["group", "supergroup"]:
@@ -68,11 +95,32 @@ async def pre_ban_worker(bot):
 
                     attempt_count += 1
                     try:
+                        await agent.get_chat_member(dialog.chat.id, resolved_id)
+                    except PeerIdInvalid:
+                        resolved_id, resolved_username = await ensure_entity(
+                            agent,
+                            resolved_id,
+                            resolved_username,
+                        )
+                    except RPCError:
+                        pass
+                    try:
                         # Ban target (works even if user is not in group)
                         await agent.ban_chat_member(dialog.chat.id, resolved_id)
-                        success_count += 1
-                    except Exception:
+                    except PeerIdInvalid:
+                        resolved_id, resolved_username = await ensure_entity(
+                            agent,
+                            resolved_id,
+                            resolved_username,
+                        )
+                        try:
+                            await agent.ban_chat_member(dialog.chat.id, resolved_id)
+                        except RPCError:
+                            continue
+                    except RPCError:
                         continue
+                    if await is_user_banned(agent, dialog.chat.id, resolved_id):
+                        success_count += 1
                 await agent.stop()
             except Exception:
                 continue
