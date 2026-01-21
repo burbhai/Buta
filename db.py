@@ -35,7 +35,10 @@ async def give_access(user_id, hours):
     await users.update_one({"user_id": user_id}, {"$set": {"expiry": expiry}}, upsert=True)
 
 async def has_access(user_id):
-    user = await users.find_one({"user_id": user_id})
+    try:
+        user = await users.find_one({"user_id": user_id})
+    except Exception:
+        return False
     if not user:
         return False
     expiry = user.get("expiry")
