@@ -1,64 +1,73 @@
+from __future__ import annotations
+
 import asyncio
-import threading
-import time
-from typing import List, Tuple
-from pyrogram import Client
-import core
-import db
+import logging
+from typing import List, Optional, Tuple
 
-LOCK = threading.Lock()
+LOGGER = logging.getLogger(__name__)
+
+LOCK = asyncio.Lock()
 SUCCESS_COUNT = 0
-COMPLETED_TASKS: List[Tuple[str,float]] = []
+ACTIVE_TASKS = 0
+QUEUE_LENGTH = 0
+COMPLETED_TASKS: List[Tuple[str, float]] = []
+MONITOR_TASK: Optional[asyncio.Task] = None
 
-def start_queue_monitor(app: Client):
-    def monitor():
-        global SUCCESS_COUNT
-        while True:
-            try:
-                with LOCK:
-                    if core.ACTIVE_TASK or not core.QUEUE:
-                        should_sleep = True
-                    else:
-                        should_sleep = False
-                        user_id, username = core.QUEUE.pop(0)
-                        core.ACTIVE_TASK = True
-                if should_sleep:
-                    time.sleep(2)
-                    continue
-                start_time = time.time()
-                # Here, simulate task (or call core.execute_preban if exists)
-                elapsed = round(time.time()-start_time,2)
-                with LOCK:
-                    SUCCESS_COUNT +=1
-                    COMPLETED_TASKS.append((username, elapsed))
-                    core.ACTIVE_TASK=False
-                try:
-                    send_message = getattr(app, "send_message", None)
-                    if asyncio.iscoroutinefunction(send_message) and getattr(app, "loop", None):
-                        asyncio.run_coroutine_threadsafe(
-                            app.send_message(user_id, f"✅ {username} processed | Time {elapsed}s"),
-                            app.loop,
-                        )
-                    elif callable(send_message):
-                        app.send_message(user_id, f"✅ {username} processed | Time {elapsed}s")
-                except Exception:
-                    pass
-            except Exception: 
-                with LOCK:
-                    core.ACTIVE_TASK=False
-                time.sleep(2)
-    threading.Thread(target=monitor, daemon=True).start()
 
-def get_queue_status() -> str:
-    with LOCK:
-        q_len=len(core.QUEUE)
-        active=core.ACTIVE_TASK
-    return f"📊 Queue: {'Yes' if active else 'No'} | {q_len} items | Total done: {SUCCESS_COUNT}"
+async def _monitor_queue(queue: asyncio.Queue, interval: float) -> None:
+    """Periodically snapshot queue length without busy looping."""
+    global QUEUE_LENGTH
+    while True:
+        try:
+            async with LOCK:
+                QUEUE_LENGTH = queue.qsize()
+        except Exception:
+            LOGGER.exception("Queue monitor failed.")
+        await asyncio.sleep(interval)
 
-def get_completed_tasks_summary() -> str:
-    with LOCK:
-        if not COMPLETED_TASKS: return "No tasks completed yet."
-        s="✅ Completed Tasks:\n"
-        for i,(u,t) in enumerate(COMPLETED_TASKS,1):
-            s+=f"{i}. {u} | {t}s\n"
-        return s
+
+def start_queue_monitor(queue: asyncio.Queue, *, interval: float = 2.0) -> asyncio.Task:
+    """Start a background task that tracks queue length."""
+    global MONITOR_TASK
+    if MONITOR_TASK and not MONITOR_TASK.done():
+        return MONITOR_TASK
+    MONITOR_TASK = asyncio.create_task(_monitor_queue(queue, interval))
+    return MONITOR_TASK
+
+
+async def mark_task_started(label: str) -> None:
+    """Mark a queue task as started."""
+    global ACTIVE_TASKS
+    async with LOCK:
+        ACTIVE_TASKS += 1
+
+
+async def mark_task_completed(label: str, elapsed: float) -> None:
+    """Mark a queue task as completed with elapsed time."""
+    global ACTIVE_TASKS, SUCCESS_COUNT
+    async with LOCK:
+        ACTIVE_TASKS = max(0, ACTIVE_TASKS - 1)
+        SUCCESS_COUNT += 1
+        COMPLETED_TASKS.append((label, round(elapsed, 2)))
+        if len(COMPLETED_TASKS) > 50:
+            COMPLETED_TASKS.pop(0)
+
+
+async def get_queue_status() -> str:
+    """Return a formatted status string for the queue."""
+    async with LOCK:
+        q_len = QUEUE_LENGTH
+        active = ACTIVE_TASKS
+        done = SUCCESS_COUNT
+    return f"📊 Queue: {'Yes' if active else 'No'} | {q_len} items | Total done: {done}"
+
+
+async def get_completed_tasks_summary() -> str:
+    """Return a summary of recently completed tasks."""
+    async with LOCK:
+        if not COMPLETED_TASKS:
+            return "No tasks completed yet."
+        summary = "✅ Completed Tasks:\n"
+        for idx, (label, elapsed) in enumerate(COMPLETED_TASKS, 1):
+            summary += f"{idx}. {label} | {elapsed}s\n"
+        return summary

@@ -1,18 +1,26 @@
-import asyncio
+from __future__ import annotations
+
+import logging
+import uuid
+
 from pyrogram import Client
 from pyrogram.errors import RPCError
-from db import sessions
+
 from config import Config
+from db import add_session
+
+LOGGER = logging.getLogger(__name__)
 
 
 async def validate_session(session_string: str) -> bool:
+    """Validate a Pyrogram session string by calling get_me()."""
     try:
         async with Client(
-            name="check",
+            name=f"session_check_{uuid.uuid4().hex}",
             api_id=Config.API_ID,
             api_hash=Config.API_HASH,
             session_string=session_string,
-            in_memory=True
+            in_memory=True,
         ) as app:
             await app.get_me()
         return True
@@ -20,12 +28,21 @@ async def validate_session(session_string: str) -> bool:
         return False
 
 
-async def save_session(session_string: str):
-    if await validate_session(session_string):
-        await sessions.update_one(
-            {"session": session_string},
-            {"$set": {"active": True}},
-            upsert=True
-        )
+async def save_session(session_string: str) -> bool:
+    """Validate and upsert a session as active."""
+    try:
+        async with Client(
+            name=f"session_save_{uuid.uuid4().hex}",
+            api_id=Config.API_ID,
+            api_hash=Config.API_HASH,
+            session_string=session_string,
+            in_memory=True,
+        ) as app:
+            me = await app.get_me()
+        await add_session(session_string, me.first_name, me.phone_number or str(me.id))
         return True
-    return False
+    except RPCError:
+        return False
+    except Exception:
+        LOGGER.exception("Failed to save session.")
+        return False
