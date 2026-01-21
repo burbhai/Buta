@@ -30,6 +30,17 @@ async def ensure_indexes() -> None:
     except Exception:
         LOGGER.exception("Failed to create MongoDB indexes.")
 
+
+async def check_db_health() -> bool:
+    """Ping MongoDB to confirm connectivity at startup."""
+    try:
+        await client.admin.command("ping")
+        LOGGER.info("MongoDB connectivity check: OK.")
+        return True
+    except Exception:
+        LOGGER.exception("MongoDB connectivity check failed.")
+        return False
+
 async def get_settings() -> Dict[str, Any]:
     """Return bot settings document."""
     return await settings.find_one({"id": "bot_config"}) or {}

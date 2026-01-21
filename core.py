@@ -304,6 +304,13 @@ def _can_restrict(me_member: Any) -> bool:
     return bool(priv and getattr(priv, "can_restrict_members", False))
 
 
+async def _safe_send(bot: Client, chat_id: int, text: str) -> None:
+    try:
+        await bot.send_message(chat_id, text)
+    except Exception:
+        LOGGER.exception("Failed to send message to chat_id=%s.", chat_id)
+
+
 async def _process_one_session(
     session_row: Dict[str, Any],
     target_id: Optional[int],
@@ -422,53 +429,62 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
     while True:
         target_info, requester_id = await ban_queue.get()
         start_time = time.time()
+        target_label = "unknown"
+        success = False
 
-        conf = await get_settings()
-        log_group = conf.get("log_group")
-        verify_enabled = conf.get("verify_enabled", True)
-        verify_delay = float(conf.get("verify_delay", 1))
-
-        all_sessions = await get_active_sessions()
-
-        # Metrics
-        success_count = 0
-        attempt_count = 0
-        session_count = 0
-        chat_metrics: Dict[int, Dict[str, Any]] = {}
-
-        # Fallback warm-up pool (shared across sessions of this request)
-        fallback_entities: List[Dict[str, Any]] = []
-        fallback_entity_ids: Set[int] = set()
-
-        # Normalize target
-        target_id: Optional[int] = None
-        target_username: Optional[str] = None
-        if isinstance(target_info, dict):
-            target_id = target_info.get("id")
-            target_username = target_info.get("username")
-        else:
-            target_id = target_info
-
-        # Run sessions in parallel (bounded)
-        sem = asyncio.Semaphore(max(1, int(session_concurrency)))
-
-        async def run_one(srow: Dict[str, Any]):
-            nonlocal session_count
-            async with sem:
-                session_count += 1
-                return await _process_one_session(
-                    srow,
-                    target_id,
-                    target_username,
-                    fallback_entities,
-                    fallback_entity_ids,
-                    verify_enabled,
-                    verify_delay,
-                )
-
-        target_label = target_id if target_id is not None else (target_username or "unknown")
-        await mark_task_started(str(target_label))
         try:
+            # Normalize target
+            target_id: Optional[int] = None
+            target_username: Optional[str] = None
+            if isinstance(target_info, dict):
+                target_id = target_info.get("id")
+                target_username = target_info.get("username")
+            else:
+                target_id = target_info
+
+            target_label = target_id if target_id is not None else (target_username or "unknown")
+            await mark_task_started(str(target_label))
+
+            conf = await get_settings()
+            log_group = conf.get("log_group")
+            verify_enabled = conf.get("verify_enabled", True)
+            verify_delay = float(conf.get("verify_delay", 1))
+
+            all_sessions = await get_active_sessions()
+            if not all_sessions:
+                msg = "❌ No active sessions configured. Ask an owner to add sessions."
+                await _safe_send(bot, requester_id, msg)
+                if log_group:
+                    await _safe_send(bot, log_group, f"{msg}\nRequester: `{requester_id}`")
+                return
+
+            # Metrics
+            success_count = 0
+            attempt_count = 0
+            session_count = 0
+            chat_metrics: Dict[int, Dict[str, Any]] = {}
+
+            # Fallback warm-up pool (shared across sessions of this request)
+            fallback_entities: List[Dict[str, Any]] = []
+            fallback_entity_ids: Set[int] = set()
+
+            # Run sessions in parallel (bounded)
+            sem = asyncio.Semaphore(max(1, int(session_concurrency)))
+
+            async def run_one(srow: Dict[str, Any]):
+                nonlocal session_count
+                async with sem:
+                    session_count += 1
+                    return await _process_one_session(
+                        srow,
+                        target_id,
+                        target_username,
+                        fallback_entities,
+                        fallback_entity_ids,
+                        verify_enabled,
+                        verify_delay,
+                    )
+
             try:
                 tasks = [asyncio.create_task(run_one(s)) for s in all_sessions]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -498,34 +514,52 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 metrics_block = f"\n\n**Per-chat Metrics**\n{metrics_block}"
 
             if log_group:
-                try:
-                    await bot.send_message(
-                        log_group,
-                        "🛡 **Pre-Ban Done**"
-                        f"\nTarget: `{target_label}`"
-                        f"\nSessions Used: {session_count}"
-                        f"\nAttempts: {attempt_count}"
-                        f"\nTotal Verified Bans: {success_count}"
-                        f"\nBy: `{requester_id}`"
-                        f"{metrics_block}",
-                    )
-                except Exception:
-                    LOGGER.exception("Failed to send log group report.")
-
-            try:
-                await bot.send_message(
-                    requester_id,
-                    "✅ Pre-ban finished"
+                await _safe_send(
+                    bot,
+                    log_group,
+                    "🛡 **Pre-Ban Done**"
                     f"\nTarget: `{target_label}`"
                     f"\nSessions Used: {session_count}"
                     f"\nAttempts: {attempt_count}"
                     f"\nTotal Verified Bans: {success_count}"
+                    f"\nBy: `{requester_id}`"
                     f"{metrics_block}",
                 )
+
+            await _safe_send(
+                bot,
+                requester_id,
+                "✅ Pre-ban finished"
+                f"\nTarget: `{target_label}`"
+                f"\nSessions Used: {session_count}"
+                f"\nAttempts: {attempt_count}"
+                f"\nTotal Verified Bans: {success_count}"
+                f"{metrics_block}",
+            )
+            success = True
+        except Exception as exc:
+            LOGGER.exception("Pre-ban worker failed.")
+            failure_message = (
+                "❌ Pre-ban failed due to an internal error. "
+                "Please try again or contact support."
+            )
+            await _safe_send(bot, requester_id, failure_message)
+            try:
+                conf = await get_settings()
+                log_group = conf.get("log_group")
             except Exception:
-                LOGGER.exception("Failed to send requester report.")
+                log_group = None
+            if log_group:
+                await _safe_send(
+                    bot,
+                    log_group,
+                    f"{failure_message}\nTarget: `{target_label}`\nBy: `{requester_id}`",
+                )
         finally:
-            await mark_task_completed(str(target_label), time.time() - start_time)
+            try:
+                await mark_task_completed(str(target_label), time.time() - start_time, success=success)
+            except Exception:
+                LOGGER.exception("Failed to update queue metrics.")
             ban_queue.task_done()
             await asyncio.sleep(2)  # cooldown
 

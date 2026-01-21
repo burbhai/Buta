@@ -11,6 +11,22 @@ from db import get_settings, give_access
 
 LOGGER = logging.getLogger(__name__)
 
+
+async def _safe_reply(message: types.Message, text: str) -> None:
+    try:
+        await message.reply(text)
+    except Exception:
+        LOGGER.exception("Failed to reply to message.")
+
+
+@bot.on_message(filters.photo & filters.group)
+async def payment_group_redirect(bot, message):
+    try:
+        await _safe_reply(message, "⚠️ Please DM the bot to submit payment proof.")
+    except Exception:
+        LOGGER.exception("Payment group redirect failed.")
+
+
 @bot.on_message(filters.photo & filters.private)
 async def handle_payment_screenshot(bot, message):
     try:
@@ -20,7 +36,7 @@ async def handle_payment_screenshot(bot, message):
         log_group = conf.get("log_group")
 
         if not log_group:
-            await message.reply("Admin hasn't setup log group yet.")
+            await _safe_reply(message, "Admin hasn't setup log group yet.")
             return
 
         # Forward to log group with approval buttons
@@ -33,13 +49,10 @@ async def handle_payment_screenshot(bot, message):
 
         await message.forward(log_group)
         await bot.send_message(log_group, f"💳 **New Payment** from `{message.from_user.id}`", reply_markup=kb)
-        await message.reply("🕒 Screenshot sent. Wait for admin approval.")
+        await _safe_reply(message, "🕒 Screenshot sent. Wait for admin approval.")
     except Exception:
         LOGGER.exception("Payment screenshot handler failed.")
-        try:
-            await message.reply("❌ Failed to submit payment proof.")
-        except Exception:
-            pass
+        await _safe_reply(message, "❌ Failed to submit payment proof.")
 
 @bot.on_callback_query(filters.regex(r"app_(\d+)_(\d+)") & filters.user(Config.OWNERS))
 async def approve_user(bot, cb):
