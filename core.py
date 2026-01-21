@@ -6,6 +6,41 @@ from config import Config
 
 ban_queue = asyncio.Queue()
 
+async def gather_fallback_members(agent, chat_id, limit=30, retries=2):
+    members = []
+    attempt = 0
+    while attempt <= retries:
+        try:
+            async for member in agent.get_chat_members(chat_id):
+                if member.user:
+                    members.append(member.user.id)
+                if len(members) >= limit:
+                    break
+            return members
+        except PeerIdInvalid:
+            attempt += 1
+            if attempt > retries:
+                return members
+        except RPCError:
+            return members
+    return members
+
+async def inject_fallback_entities(agent, member_ids):
+    if not member_ids:
+        return
+    try:
+        await agent.get_users(member_ids)
+    except RPCError:
+        return
+
+async def resolve_with_fallback(agent, chat_id, target_id, target_username, fallback_cache):
+    fallback_members = fallback_cache.get(chat_id)
+    if fallback_members is None:
+        fallback_members = await gather_fallback_members(agent, chat_id)
+        fallback_cache[chat_id] = fallback_members
+    await inject_fallback_entities(agent, fallback_members)
+    return await ensure_entity(agent, target_id, target_username)
+
 async def ensure_entity(agent, target_id, target_username):
     resolved_id = target_id
     resolved_username = target_username
@@ -71,6 +106,7 @@ async def pre_ban_worker(bot):
                 )
                 await agent.start()
                 session_count += 1
+                fallback_cache = {}
                 resolved_id, resolved_username = await ensure_entity(
                     agent,
                     target_id,
@@ -97,10 +133,12 @@ async def pre_ban_worker(bot):
                     try:
                         await agent.get_chat_member(dialog.chat.id, resolved_id)
                     except PeerIdInvalid:
-                        resolved_id, resolved_username = await ensure_entity(
+                        resolved_id, resolved_username = await resolve_with_fallback(
                             agent,
+                            dialog.chat.id,
                             resolved_id,
                             resolved_username,
+                            fallback_cache,
                         )
                     except RPCError:
                         pass
@@ -108,10 +146,12 @@ async def pre_ban_worker(bot):
                         # Ban target (works even if user is not in group)
                         await agent.ban_chat_member(dialog.chat.id, resolved_id)
                     except PeerIdInvalid:
-                        resolved_id, resolved_username = await ensure_entity(
+                        resolved_id, resolved_username = await resolve_with_fallback(
                             agent,
+                            dialog.chat.id,
                             resolved_id,
                             resolved_username,
+                            fallback_cache,
                         )
                         try:
                             await agent.ban_chat_member(dialog.chat.id, resolved_id)
