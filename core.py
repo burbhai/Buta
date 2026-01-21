@@ -13,29 +13,68 @@ async def pre_ban_worker(bot):
         
         all_sessions = await get_active_sessions()
         success_count = 0
+        attempt_count = 0
+        session_count = 0
         
         for s in all_sessions:
             try:
                 # Use in_memory to avoid creating .session files on Heroku
-                agent = Client("agent", session_string=s['string'], 
-                               api_id=Config.API_ID, api_hash=Config.API_HASH, in_memory=True)
+                agent = Client(
+                    "agent",
+                    session_string=s["string"],
+                    api_id=Config.API_ID,
+                    api_hash=Config.API_HASH,
+                    in_memory=True,
+                )
                 await agent.start()
-                
+                session_count += 1
+                try:
+                    await agent.get_users(target)
+                except Exception:
+                    pass
+
                 async for dialog in agent.get_dialogs():
-                    if dialog.chat.type in ["group", "supergroup", "channel"]:
-                        try:
-                            # Ban target (works even if user is not in group)
-                            await agent.ban_chat_member(dialog.chat.id, target)
-                            success_count += 1
-                        except Exception:
-                            continue
+                    if dialog.chat.type not in ["group", "supergroup"]:
+                        continue
+                    try:
+                        me_member = await agent.get_chat_member(dialog.chat.id, "me")
+                    except Exception:
+                        continue
+                    can_restrict = me_member.status == "creator"
+                    if not can_restrict and getattr(me_member, "privileges", None):
+                        can_restrict = bool(me_member.privileges.can_restrict_members)
+                    if not can_restrict:
+                        continue
+
+                    attempt_count += 1
+                    try:
+                        # Ban target (works even if user is not in group)
+                        await agent.ban_chat_member(dialog.chat.id, target)
+                        success_count += 1
+                    except Exception:
+                        continue
                 await agent.stop()
             except Exception:
                 continue
 
         if log_group:
-            await bot.send_message(log_group, f"🛡 **Pre-Ban Done**\nTarget: `{target}`\nTotal Bans: {success_count}\nBy: `{requester_id}`")
+            await bot.send_message(
+                log_group,
+                "🛡 **Pre-Ban Done**"
+                f"\nTarget: `{target}`"
+                f"\nSessions Used: {session_count}"
+                f"\nAttempts: {attempt_count}"
+                f"\nTotal Bans: {success_count}"
+                f"\nBy: `{requester_id}`",
+            )
         
-        await bot.send_message(requester_id, f"✅ Pre-ban finished for `{target}` across {success_count} groups.")
+        await bot.send_message(
+            requester_id,
+            "✅ Pre-ban finished"
+            f"\nTarget: `{target}`"
+            f"\nSessions Used: {session_count}"
+            f"\nAttempts: {attempt_count}"
+            f"\nTotal Bans: {success_count}",
+        )
         ban_queue.task_done()
         await asyncio.sleep(2) # Cooldown

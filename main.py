@@ -1,7 +1,7 @@
 import asyncio
 from pyrogram import Client, filters
 from config import Config
-from db import get_settings, add_session
+from db import get_settings, add_session, get_active_sessions
 from core import pre_ban_worker
 import handlers  # noqa: F401
 import payment_handler  # noqa: F401
@@ -19,7 +19,11 @@ async def auto_session_val(client, message):
             me = await temp.get_me()
             await add_session(message.text, me.first_name, me.phone_number)
             await temp.stop()
-            await message.reply(f"✅ Session Valid: {me.first_name} added.")
+            active_sessions = await get_active_sessions()
+            await message.reply(
+                f"✅ Session Valid: {me.first_name} added.\n"
+                f"📊 Active Sessions: {len(active_sessions)}"
+            )
         except Exception as e:
             await message.reply(f"❌ Invalid Session: {e}")
 
