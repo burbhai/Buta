@@ -4,6 +4,22 @@ from db import update_setting, get_active_sessions, deactivate_session, has_acce
 from config import Config
 from core import ban_queue
 
+@Client.on_message(filters.command("start") & filters.private)
+async def start(bot, message):
+    if not message.from_user:
+        return
+    is_owner = message.from_user.id in Config.OWNERS
+    access_note = (
+        "✅ You have access to /preban."
+        if is_owner or await has_access(message.from_user.id)
+        else "❌ You are not authorized yet. Send payment proof to get access."
+    )
+    await message.reply(
+        "👋 **Welcome to StartLove Bot**\n\n"
+        "Use /preban <user_id or @username> to queue a pre-ban request.\n"
+        f"{access_note}"
+    )
+
 @Client.on_message(filters.command("set_log") & filters.user(Config.OWNERS))
 async def set_log_group(bot, message):
     await update_setting("log_group", message.chat.id)
