@@ -54,12 +54,25 @@ async def auto_session_val(client, message):
 
 async def main():
     Config.validate()
-    await check_db_health()
+    if not await check_db_health():
+        LOGGER.error("MongoDB is unavailable. Exiting.")
+        raise SystemExit(1)
     await ensure_indexes()
     await bot.start()
     start_queue_monitor(ban_queue)
-    worker_tasks = start_preban_workers(bot, num_workers=2, session_concurrency=3)
-    asyncio.create_task(_supervise_workers(bot, worker_tasks, num_workers=2, session_concurrency=3))
+    worker_tasks = start_preban_workers(
+        bot,
+        num_workers=Config.PREBAN_WORKERS,
+        session_concurrency=Config.SESSION_CONCURRENCY,
+    )
+    asyncio.create_task(
+        _supervise_workers(
+            bot,
+            worker_tasks,
+            num_workers=Config.PREBAN_WORKERS,
+            session_concurrency=Config.SESSION_CONCURRENCY,
+        )
+    )
     LOGGER.info("Bot is running.")
     await asyncio.Event().wait()
 

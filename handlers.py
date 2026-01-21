@@ -10,18 +10,19 @@ from pyrogram.errors import FloodWait, RPCError
 
 from bot_instance import bot
 from config import Config
-from core import ban_queue
+from core import ban_queue, get_worker_status
 from db import (
     add_session,
     deactivate_session,
     get_active_sessions,
     get_active_sudo_users,
+    check_db_health,
     give_access,
     has_access,
     revoke_access,
     update_setting,
 )
-from queue_handler import get_queue_status
+from queue_handler import get_queue_snapshot, get_queue_status
 
 LOVE_TRACKER = {}
 LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,21 @@ async def _safe_edit(cb: types.CallbackQuery, text: str, reply_markup: Optional[
             await cb.message.reply(text, reply_markup=reply_markup)
         except Exception:
             LOGGER.exception("Failed to send fallback reply.")
+
+
+async def _answer_cb(
+    cb: types.CallbackQuery,
+    text: str | None = None,
+    *,
+    show_alert: bool = False,
+) -> None:
+    try:
+        if text is None:
+            await cb.answer()
+        else:
+            await cb.answer(text, show_alert=show_alert)
+    except Exception:
+        LOGGER.exception("Failed to answer callback query.")
 
 
 async def _resolve_user_id(client, raw: str) -> Tuple[Optional[int], Optional[str]]:
@@ -156,6 +172,7 @@ def _dm_only_message() -> str:
             "manage",
             "set_log",
             "set_session",
+            "health",
         ]
     )
     & filters.group
@@ -201,6 +218,7 @@ async def go_home(bot, cb):
     try:
         if not cb.from_user:
             return
+        await _answer_cb(cb)
         is_owner = cb.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(cb.from_user.id)
         if is_owner:
@@ -229,6 +247,7 @@ async def go_home(bot, cb):
 @bot.on_callback_query(filters.regex(r"^payment_info$") & filters.private)
 async def payment_info(bot, cb):
     try:
+        await _answer_cb(cb)
         await _safe_edit(
             cb,
             "💳 **Payment to Send Love**\n\n"
@@ -243,6 +262,7 @@ async def payment_info(bot, cb):
 @bot.on_callback_query(filters.regex(r"^payment_how$") & filters.private)
 async def payment_how(bot, cb):
     try:
+        await _answer_cb(cb)
         await _safe_edit(
             cb,
             "📤 **Send Payment Screenshot**\n\n"
@@ -260,7 +280,7 @@ async def love_send(bot, cb):
             return
         is_owner = cb.from_user.id in Config.OWNERS
         if not is_owner and not await has_access(cb.from_user.id):
-            await cb.answer("Payment required to send love.", show_alert=True)
+            await _answer_cb(cb, "Payment required to send love.", show_alert=True)
             await _safe_edit(
                 cb,
                 "💳 **Payment Required**\n\n"
@@ -268,6 +288,7 @@ async def love_send(bot, cb):
                 reply_markup=_payment_keyboard(),
             )
             return
+        await _answer_cb(cb)
         LOVE_TRACKER[cb.from_user.id] = "awaiting_target"
         await _safe_edit(
             cb,
@@ -283,8 +304,9 @@ async def love_send(bot, cb):
 async def owner_panel(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         await _safe_edit(
             cb,
             "👑 **Owner Panel**\n\n"
@@ -299,8 +321,9 @@ async def owner_panel(bot, cb):
 async def owner_add_sudo(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         await _safe_edit(
             cb,
             "➕ **Add Sudo User**\n\n"
@@ -315,8 +338,9 @@ async def owner_add_sudo(bot, cb):
 async def owner_remove_sudo(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         await _safe_edit(
             cb,
             "➖ **Remove Sudo User**\n\n"
@@ -331,8 +355,9 @@ async def owner_remove_sudo(bot, cb):
 async def owner_add_prompt(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         LOVE_TRACKER[cb.from_user.id] = "owner_add_sudo"
         await _safe_edit(
             cb,
@@ -347,8 +372,9 @@ async def owner_add_prompt(bot, cb):
 async def owner_remove_prompt(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         LOVE_TRACKER[cb.from_user.id] = "owner_remove_sudo"
         await _safe_edit(
             cb,
@@ -363,8 +389,9 @@ async def owner_remove_prompt(bot, cb):
 async def owner_sudo_list(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         sudo_users = await get_active_sudo_users()
         if not sudo_users:
             text = "📄 **Sudo List**\n\nNo active sudo users."
@@ -380,8 +407,9 @@ async def owner_sudo_list(bot, cb):
 async def owner_manage_sessions(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         all_s = await get_active_sessions()
         text = f"📑 **Active Sessions ({len(all_s)}):**\n\n"
         kb = []
@@ -398,10 +426,10 @@ async def owner_manage_sessions(bot, cb):
 async def owner_set_log_cb(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         await update_setting("log_group", cb.message.chat.id)
-        await cb.answer("Log group set to this chat.", show_alert=True)
         await _safe_edit(
             cb,
             "✅ This chat is now the **Log Group**.",
@@ -415,10 +443,10 @@ async def owner_set_log_cb(bot, cb):
 async def owner_set_session_cb(bot, cb):
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
-            await cb.answer("Owner only.", show_alert=True)
+            await _answer_cb(cb, "Owner only.", show_alert=True)
             return
+        await _answer_cb(cb)
         await update_setting("session_group", cb.message.chat.id)
-        await cb.answer("Session group set to this chat.", show_alert=True)
         await _safe_edit(
             cb,
             "✅ This chat is now the **Session Validation Group**.",
@@ -464,9 +492,9 @@ async def manage_sessions(bot, message):
 @bot.on_callback_query(filters.regex(r"^rem_(.+)$") & filters.user(Config.OWNERS))
 async def remove_session(bot, cb):
     try:
+        await _answer_cb(cb)
         phone = cb.matches[0].group(1)
         await deactivate_session(phone)
-        await cb.answer("Session removed.", show_alert=True)
         await _safe_edit(cb, f"✅ Removed session for {phone}.")
     except Exception:
         LOGGER.exception("Remove session callback failed.")
@@ -508,6 +536,10 @@ async def handle_text_messages(bot, message):
             if target_id is None and target_username is None:
                 await _safe_reply(message, "❌ Failed to resolve user.")
                 return
+            if Config.QUEUE_MAXSIZE > 0 and ban_queue.full():
+                await _safe_reply(message, "⚠️ Queue is full. Please try again in a moment.")
+                LOVE_TRACKER.pop(message.from_user.id, None)
+                return
             await ban_queue.put(({"id": target_id, "username": target_username}, message.from_user.id))
             queued_label = target_id if target_id is not None else f"@{target_username}"
             await _safe_reply(
@@ -543,6 +575,10 @@ async def preban_user(bot, message):
             await _safe_reply(message, "❌ Failed to resolve user.")
             return
 
+        if Config.QUEUE_MAXSIZE > 0 and ban_queue.full():
+            await _safe_reply(message, "⚠️ Queue is full. Please try again in a moment.")
+            return
+
         await ban_queue.put(({"id": target_id, "username": target_username}, message.from_user.id))
         queued_label = target_id if target_id is not None else f"@{target_username}"
         await _safe_reply(message, f"🕒 Added `{queued_label}` to pre-ban queue.")
@@ -566,6 +602,28 @@ async def status_command(bot, message):
     except Exception:
         LOGGER.exception("Status command failed.")
         await _safe_reply(message, "❌ Failed to get queue status.")
+
+
+@bot.on_message(filters.command("health") & filters.user(Config.OWNERS))
+async def health_command(bot, message):
+    try:
+        db_ok = await check_db_health()
+        sessions = await get_active_sessions()
+        queue_snapshot = await get_queue_snapshot()
+        worker_status = get_worker_status()
+        text = (
+            "🩺 **Health Check**\n\n"
+            f"DB: {'OK' if db_ok else 'FAIL'}\n"
+            f"Active Sessions: {len(sessions)}\n"
+            f"Workers: {worker_status['alive']}/{worker_status['total']}\n"
+            f"Queue Length: {queue_snapshot['queue_length']}\n"
+            f"Active Tasks: {queue_snapshot['active_tasks']}\n"
+            f"Total Completed: {queue_snapshot['success_count']}"
+        )
+        await _safe_reply(message, text)
+    except Exception:
+        LOGGER.exception("Health command failed.")
+        await _safe_reply(message, "❌ Failed to collect health status.")
 
 
 @bot.on_message(filters.command("addsession") & filters.user(Config.OWNERS))

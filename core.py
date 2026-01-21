@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, List, Set
 
 from pyrogram import Client, enums
-from pyrogram.errors import PeerIdInvalid, RPCError, FloodWait
+from pyrogram.errors import PeerIdInvalid, RPCError, FloodWait, UserNotParticipant
 
 from pyrogram.raw import functions, types
 
@@ -17,7 +17,9 @@ from config import Config
 
 LOGGER = logging.getLogger(__name__)
 
-ban_queue: "asyncio.Queue[Tuple[Any, int]]" = asyncio.Queue()
+_QUEUE_MAXSIZE = max(0, int(getattr(Config, "QUEUE_MAXSIZE", 0)))
+ban_queue: "asyncio.Queue[Tuple[Any, int]]" = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
+WORKER_TASKS: List[asyncio.Task] = []
 
 
 # -----------------------------
@@ -253,10 +255,18 @@ async def force_preban_raw(
     chat_id: int,
     user_id: int,
     access_hash: int,
+    chat_type: str,
 ) -> None:
     """
     Strong pre-ban (user can be not in group) using raw API.
     """
+    if chat_type == "group":
+        await with_floodwait(
+            lambda: agent.kick_chat_member(chat_id, user_id=user_id),
+            max_retries=5,
+        )
+        return
+
     async def _invoke():
         return await agent.invoke(
             functions.channels.EditBanned(
@@ -271,9 +281,16 @@ async def force_preban_raw(
 
 async def is_user_banned(agent: Client, chat_id: int, target_id: int) -> bool:
     try:
-        async for member in agent.get_chat_members(chat_id, filter=enums.ChatMembersFilter.BANNED):
-            if member.user and member.user.id == target_id:
-                return True
+        member = await agent.get_chat_member(chat_id, target_id)
+        status = getattr(member, "status", None)
+        return status in {
+            enums.ChatMemberStatus.BANNED,
+            enums.ChatMemberStatus.KICKED,
+            "banned",
+            "kicked",
+        }
+    except UserNotParticipant:
+        return False
     except FloodWait as e:
         await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
         return False
@@ -292,6 +309,7 @@ def format_chat_metrics(chat_metrics: Dict[int, Dict[str, Any]]) -> str:
             f"- {title} ({chat_id}): "
             f"attempts={data['attempts']} "
             f"bans={data['bans']} "
+            f"skipped={data['skipped']} "
             f"verified={data['verified']}"
         )
     return "\n".join(lines)
@@ -348,6 +366,18 @@ async def _process_one_session(
 
         async for dialog in agent.get_dialogs():
             if dialog.chat.type not in ["group", "supergroup"]:
+                if dialog.chat.type == "channel":
+                    chat_data = chat_metrics.setdefault(
+                        dialog.chat.id,
+                        {
+                            "title": getattr(dialog.chat, "title", None),
+                            "attempts": 0,
+                            "bans": 0,
+                            "skipped": 0,
+                            "verified": 0,
+                        },
+                    )
+                    chat_data["skipped"] += 1
                 continue
 
             try:
@@ -355,19 +385,22 @@ async def _process_one_session(
             except Exception:
                 continue
 
-            if not _can_restrict(me_member):
-                continue
-
-            attempts += 1
             chat_data = chat_metrics.setdefault(
                 dialog.chat.id,
                 {
                     "title": getattr(dialog.chat, "title", None),
                     "attempts": 0,
                     "bans": 0,
+                    "skipped": 0,
                     "verified": 0,
                 },
             )
+
+            if not _can_restrict(me_member):
+                chat_data["skipped"] += 1
+                continue
+
+            attempts += 1
             chat_data["attempts"] += 1
 
             if resolved_id is None or access_hash is None:
@@ -382,9 +415,15 @@ async def _process_one_session(
                 if resolved_id is None or access_hash is None:
                     continue
 
-            # Pre-ban RAW (works even if user not in group)
+            # Pre-ban RAW for supergroups, fallback to kick for basic groups
             try:
-                await force_preban_raw(agent, dialog.chat.id, resolved_id, access_hash)
+                await force_preban_raw(
+                    agent,
+                    dialog.chat.id,
+                    resolved_id,
+                    access_hash,
+                    dialog.chat.type,
+                )
                 chat_data["bans"] += 1
             except PeerIdInvalid:
                 # Warm-up and retry once
@@ -399,7 +438,13 @@ async def _process_one_session(
                 if resolved_id is None or access_hash is None:
                     continue
                 try:
-                    await force_preban_raw(agent, dialog.chat.id, resolved_id, access_hash)
+                    await force_preban_raw(
+                        agent,
+                        dialog.chat.id,
+                        resolved_id,
+                        access_hash,
+                        dialog.chat.type,
+                    )
                     chat_data["bans"] += 1
                 except RPCError:
                     continue
@@ -456,7 +501,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 await _safe_send(bot, requester_id, msg)
                 if log_group:
                     await _safe_send(bot, log_group, f"{msg}\nRequester: `{requester_id}`")
-                return
+                continue
 
             # Metrics
             success_count = 0
@@ -502,10 +547,17 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 for cid, data in per_chat.items():
                     agg = chat_metrics.setdefault(
                         cid,
-                        {"title": data.get("title"), "attempts": 0, "bans": 0, "verified": 0},
+                        {
+                            "title": data.get("title"),
+                            "attempts": 0,
+                            "bans": 0,
+                            "skipped": 0,
+                            "verified": 0,
+                        },
                     )
                     agg["attempts"] += data.get("attempts", 0)
                     agg["bans"] += data.get("bans", 0)
+                    agg["skipped"] += data.get("skipped", 0)
                     agg["verified"] += data.get("verified", 0)
 
             # Notify
@@ -573,4 +625,17 @@ def start_preban_workers(bot, *, num_workers: int = 2, session_concurrency: int 
     tasks: List[asyncio.Task] = []
     for _ in range(max(1, int(num_workers))):
         tasks.append(asyncio.create_task(pre_ban_worker(bot, session_concurrency=session_concurrency)))
+    register_worker_tasks(tasks)
     return tasks
+
+
+def register_worker_tasks(tasks: List[asyncio.Task]) -> None:
+    global WORKER_TASKS
+    WORKER_TASKS = tasks
+
+
+def get_worker_status() -> Dict[str, int]:
+    return {
+        "total": len(WORKER_TASKS),
+        "alive": sum(1 for task in WORKER_TASKS if not task.done()),
+    }
