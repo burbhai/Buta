@@ -34,7 +34,7 @@ async def _answer_cb(
         LOGGER.exception("Failed to answer callback query.")
 
 
-@bot.on_message(filters.photo & (filters.group | filters.supergroup))
+@bot.on_message(filters.photo & filters.group)
 async def payment_group_redirect(bot, message):
     try:
         await _safe_reply(message, "⚠️ Please DM the bot to submit payment proof.")
