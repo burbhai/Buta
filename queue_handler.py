@@ -1,4 +1,6 @@
-import threading, time
+import asyncio
+import threading
+import time
 from typing import List, Tuple
 from pyrogram import Client
 import core
@@ -15,10 +17,14 @@ def start_queue_monitor(app: Client):
             try:
                 with LOCK:
                     if core.ACTIVE_TASK or not core.QUEUE:
-                        time.sleep(2)
-                        continue
-                    user_id, username = core.QUEUE.pop(0)
-                    core.ACTIVE_TASK = True
+                        should_sleep = True
+                    else:
+                        should_sleep = False
+                        user_id, username = core.QUEUE.pop(0)
+                        core.ACTIVE_TASK = True
+                if should_sleep:
+                    time.sleep(2)
+                    continue
                 start_time = time.time()
                 # Here, simulate task (or call core.execute_preban if exists)
                 elapsed = round(time.time()-start_time,2)
@@ -26,10 +32,20 @@ def start_queue_monitor(app: Client):
                     SUCCESS_COUNT +=1
                     COMPLETED_TASKS.append((username, elapsed))
                     core.ACTIVE_TASK=False
-                try: app.send_message(user_id,f"✅ {username} processed | Time {elapsed}s")
-                except: pass
-            except: 
-                with LOCK: core.ACTIVE_TASK=False
+                try:
+                    send_message = getattr(app, "send_message", None)
+                    if asyncio.iscoroutinefunction(send_message) and getattr(app, "loop", None):
+                        asyncio.run_coroutine_threadsafe(
+                            app.send_message(user_id, f"✅ {username} processed | Time {elapsed}s"),
+                            app.loop,
+                        )
+                    elif callable(send_message):
+                        app.send_message(user_id, f"✅ {username} processed | Time {elapsed}s")
+                except Exception:
+                    pass
+            except Exception: 
+                with LOCK:
+                    core.ACTIVE_TASK=False
                 time.sleep(2)
     threading.Thread(target=monitor, daemon=True).start()
 
