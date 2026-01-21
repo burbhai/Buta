@@ -350,7 +350,6 @@ async def _process_one_session(
         session_string=session_row["string"],
         api_id=Config.API_ID,
         api_hash=Config.API_HASH,
-        in_memory=True,
     )
 
     try:
@@ -472,12 +471,15 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
     session_concurrency limits how many sessions run in parallel per ban request.
     """
     while True:
-        target_info, requester_id = await ban_queue.get()
-        start_time = time.time()
+        got_item = False
         target_label = "unknown"
+        requester_id = None
+        start_time = time.time()
         success = False
-
         try:
+            target_info, requester_id = await ban_queue.get()
+            got_item = True
+
             # Normalize target
             target_id: Optional[int] = None
             target_username: Optional[str] = None
@@ -589,13 +591,16 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 f"{metrics_block}",
             )
             success = True
-        except Exception as exc:
+        except asyncio.CancelledError:
+            raise
+        except Exception:
             LOGGER.exception("Pre-ban worker failed.")
             failure_message = (
                 "❌ Pre-ban failed due to an internal error. "
                 "Please try again or contact support."
             )
-            await _safe_send(bot, requester_id, failure_message)
+            if requester_id is not None:
+                await _safe_send(bot, requester_id, failure_message)
             try:
                 conf = await get_settings()
                 log_group = conf.get("log_group")
@@ -608,12 +613,15 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     f"{failure_message}\nTarget: `{target_label}`\nBy: `{requester_id}`",
                 )
         finally:
-            try:
-                await mark_task_completed(str(target_label), time.time() - start_time, success=success)
-            except Exception:
-                LOGGER.exception("Failed to update queue metrics.")
-            ban_queue.task_done()
-            await asyncio.sleep(2)  # cooldown
+            if got_item:
+                try:
+                    await mark_task_completed(str(target_label), time.time() - start_time, success=success)
+                except Exception:
+                    LOGGER.exception("Failed to update queue metrics.")
+                ban_queue.task_done()
+                await asyncio.sleep(2)  # cooldown
+            else:
+                await asyncio.sleep(1)
 
 
 def start_preban_workers(bot, *, num_workers: int = 2, session_concurrency: int = 3) -> List[asyncio.Task]:

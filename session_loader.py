@@ -20,7 +20,6 @@ async def validate_session(session_string: str) -> bool:
             api_id=Config.API_ID,
             api_hash=Config.API_HASH,
             session_string=session_string,
-            in_memory=True,
         ) as app:
             await app.get_me()
         return True
@@ -36,7 +35,6 @@ async def save_session(session_string: str) -> bool:
             api_id=Config.API_ID,
             api_hash=Config.API_HASH,
             session_string=session_string,
-            in_memory=True,
         ) as app:
             me = await app.get_me()
         await add_session(session_string, me.first_name, me.phone_number or str(me.id))
