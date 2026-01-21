@@ -34,6 +34,14 @@ async def give_access(user_id, hours):
     expiry = datetime.utcnow() + timedelta(hours=hours)
     await users.update_one({"user_id": user_id}, {"$set": {"expiry": expiry}}, upsert=True)
 
+async def revoke_access(user_id):
+    await users.update_one({"user_id": user_id}, {"$set": {"expiry": datetime.utcnow()}}, upsert=True)
+
+async def get_active_sudo_users():
+    now = datetime.utcnow()
+    cursor = users.find({"expiry": {"$gt": now}})
+    return await cursor.to_list(length=None)
+
 async def has_access(user_id):
     try:
         user = await users.find_one({"user_id": user_id})
