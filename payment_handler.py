@@ -1,5 +1,5 @@
 from pyrogram import Client, filters, types
-from database import get_settings, give_access
+from db import get_settings, give_access
 from config import Config
 
 @Client.on_message(filters.photo & filters.private)
@@ -27,3 +27,10 @@ async def approve_user(bot, cb):
     await bot.send_message(int(uid), "✅ **Payment Approved!** You can now send usernames.")
     await cb.answer("User Approved!", show_alert=True)
     await cb.edit_message_text(f"✅ Approved User {uid}")
+
+@Client.on_callback_query(filters.regex(r"rej_(\d+)") & filters.user(Config.OWNERS))
+async def reject_user(bot, cb):
+    uid = cb.matches[0].group(1)
+    await bot.send_message(int(uid), "❌ **Payment Rejected.** Please contact the admin.")
+    await cb.answer("User Rejected.", show_alert=True)
+    await cb.edit_message_text(f"❌ Rejected User {uid}")

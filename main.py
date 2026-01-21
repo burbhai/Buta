@@ -2,8 +2,9 @@ import asyncio
 from pyrogram import Client, filters
 from config import Config
 from db import get_settings, add_session
-from core import pre_ban_worker, ban_queue
-from session_loader import validate_session # Needs to be defined to check string
+from core import pre_ban_worker
+import handlers  # noqa: F401
+import payment_handler  # noqa: F401
 
 bot = Client("PreBanBot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN, in_memory=True)
 

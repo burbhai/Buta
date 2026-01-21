@@ -2,15 +2,15 @@ import asyncio
 from pyrogram import Client
 from pyrogram.errors import RPCError
 from db import sessions
-from config import API_ID, API_HASH
+from config import Config
 
 
 async def validate_session(session_string: str) -> bool:
     try:
         async with Client(
             name="check",
-            api_id=API_ID,
-            api_hash=API_HASH,
+            api_id=Config.API_ID,
+            api_hash=Config.API_HASH,
             session_string=session_string,
             in_memory=True
         ) as app:
@@ -22,7 +22,7 @@ async def validate_session(session_string: str) -> bool:
 
 async def save_session(session_string: str):
     if await validate_session(session_string):
-        sessions.update_one(
+        await sessions.update_one(
             {"session": session_string},
             {"$set": {"active": True}},
             upsert=True

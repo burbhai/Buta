@@ -26,6 +26,18 @@ async def add_session(session_str, name, phone):
 async def get_active_sessions():
     return await sessions.find({"active": True}).to_list(length=None)
 
+async def deactivate_session(phone):
+    await sessions.update_one({"phone": phone}, {"$set": {"active": False}})
+
 async def give_access(user_id, hours):
     expiry = datetime.utcnow() + timedelta(hours=hours)
     await users.update_one({"user_id": user_id}, {"$set": {"expiry": expiry}}, upsert=True)
+
+async def has_access(user_id):
+    user = await users.find_one({"user_id": user_id})
+    if not user:
+        return False
+    expiry = user.get("expiry")
+    if not expiry:
+        return False
+    return expiry > datetime.utcnow()
