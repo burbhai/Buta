@@ -1,8 +1,10 @@
-from pyrogram import Client, filters, types
+from pyrogram import filters, types
+
+from bot_instance import bot
 from db import get_settings, give_access
 from config import Config
 
-@Client.on_message(filters.photo & filters.private)
+@bot.on_message(filters.photo & filters.private)
 async def handle_payment_screenshot(bot, message):
     if not message.from_user:
         return
@@ -22,7 +24,7 @@ async def handle_payment_screenshot(bot, message):
     await bot.send_message(log_group, f"💳 **New Payment** from `{message.from_user.id}`", reply_markup=kb)
     await message.reply("🕒 Screenshot sent. Wait for admin approval.")
 
-@Client.on_callback_query(filters.regex(r"app_(\d+)_(\d+)") & filters.user(Config.OWNERS))
+@bot.on_callback_query(filters.regex(r"app_(\d+)_(\d+)") & filters.user(Config.OWNERS))
 async def approve_user(bot, cb):
     _, uid, hours = cb.data.split("_")
     await give_access(int(uid), int(hours))
@@ -30,7 +32,7 @@ async def approve_user(bot, cb):
     await cb.answer("User Approved!", show_alert=True)
     await cb.edit_message_text(f"✅ Approved User {uid}")
 
-@Client.on_callback_query(filters.regex(r"rej_(\d+)") & filters.user(Config.OWNERS))
+@bot.on_callback_query(filters.regex(r"rej_(\d+)") & filters.user(Config.OWNERS))
 async def reject_user(bot, cb):
     uid = cb.matches[0].group(1)
     await bot.send_message(int(uid), "❌ **Payment Rejected.** Please contact the admin.")

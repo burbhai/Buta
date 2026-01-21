@@ -1,12 +1,13 @@
 import asyncio
+
 from pyrogram import Client, filters
+
+from bot_instance import bot
 from config import Config
-from db import get_settings, add_session, get_active_sessions
 from core import pre_ban_worker
+from db import add_session, get_active_sessions, get_settings
 import handlers  # noqa: F401
 import payment_handler  # noqa: F401
-
-bot = Client("PreBanBot", api_id=Config.API_ID, api_hash=Config.API_HASH, bot_token=Config.BOT_TOKEN, in_memory=True)
 
 @bot.on_message(filters.text & filters.group)
 async def auto_session_val(client, message):
