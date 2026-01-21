@@ -1,40 +1,69 @@
+from __future__ import annotations
+
+import logging
+
 from pyrogram import filters, types
+from pyrogram.errors import RPCError
 
 from bot_instance import bot
-from db import get_settings, give_access
 from config import Config
+from db import get_settings, give_access
+
+LOGGER = logging.getLogger(__name__)
 
 @bot.on_message(filters.photo & filters.private)
 async def handle_payment_screenshot(bot, message):
-    if not message.from_user:
-        return
-    conf = await get_settings()
-    log_group = conf.get("log_group")
-    
-    if not log_group:
-        return await message.reply("Admin hasn't setup log group yet.")
+    try:
+        if not message.from_user:
+            return
+        conf = await get_settings()
+        log_group = conf.get("log_group")
 
-    # Forward to log group with approval buttons
-    kb = types.InlineKeyboardMarkup([
-        [types.InlineKeyboardButton("Approve 24h", callback_data=f"app_{message.from_user.id}_24")],
-        [types.InlineKeyboardButton("Reject", callback_data=f"rej_{message.from_user.id}")]
-    ])
-    
-    await message.forward(log_group)
-    await bot.send_message(log_group, f"💳 **New Payment** from `{message.from_user.id}`", reply_markup=kb)
-    await message.reply("🕒 Screenshot sent. Wait for admin approval.")
+        if not log_group:
+            await message.reply("Admin hasn't setup log group yet.")
+            return
+
+        # Forward to log group with approval buttons
+        kb = types.InlineKeyboardMarkup(
+            [
+                [types.InlineKeyboardButton("Approve 24h", callback_data=f"app_{message.from_user.id}_24")],
+                [types.InlineKeyboardButton("Reject", callback_data=f"rej_{message.from_user.id}")],
+            ]
+        )
+
+        await message.forward(log_group)
+        await bot.send_message(log_group, f"💳 **New Payment** from `{message.from_user.id}`", reply_markup=kb)
+        await message.reply("🕒 Screenshot sent. Wait for admin approval.")
+    except Exception:
+        LOGGER.exception("Payment screenshot handler failed.")
+        try:
+            await message.reply("❌ Failed to submit payment proof.")
+        except Exception:
+            pass
 
 @bot.on_callback_query(filters.regex(r"app_(\d+)_(\d+)") & filters.user(Config.OWNERS))
 async def approve_user(bot, cb):
-    _, uid, hours = cb.data.split("_")
-    await give_access(int(uid), int(hours))
-    await bot.send_message(int(uid), "✅ **Payment Approved!** You can now send usernames.")
-    await cb.answer("User Approved!", show_alert=True)
-    await cb.edit_message_text(f"✅ Approved User {uid}")
+    try:
+        _, uid, hours = cb.data.split("_")
+        await give_access(int(uid), int(hours))
+        await bot.send_message(int(uid), "✅ **Payment Approved!** You can now send usernames.")
+        await cb.answer("User Approved!", show_alert=True)
+        await cb.edit_message_text(f"✅ Approved User {uid}")
+    except RPCError:
+        await cb.answer("❌ Failed to approve user.", show_alert=True)
+    except Exception:
+        LOGGER.exception("Approve payment handler failed.")
+        await cb.answer("❌ Failed to approve user.", show_alert=True)
 
 @bot.on_callback_query(filters.regex(r"rej_(\d+)") & filters.user(Config.OWNERS))
 async def reject_user(bot, cb):
-    uid = cb.matches[0].group(1)
-    await bot.send_message(int(uid), "❌ **Payment Rejected.** Please contact the admin.")
-    await cb.answer("User Rejected.", show_alert=True)
-    await cb.edit_message_text(f"❌ Rejected User {uid}")
+    try:
+        uid = cb.matches[0].group(1)
+        await bot.send_message(int(uid), "❌ **Payment Rejected.** Please contact the admin.")
+        await cb.answer("User Rejected.", show_alert=True)
+        await cb.edit_message_text(f"❌ Rejected User {uid}")
+    except RPCError:
+        await cb.answer("❌ Failed to reject user.", show_alert=True)
+    except Exception:
+        LOGGER.exception("Reject payment handler failed.")
+        await cb.answer("❌ Failed to reject user.", show_alert=True)

@@ -1,6 +1,8 @@
 # path: preban.py
 import asyncio
+import logging
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, List, Set
 
@@ -10,11 +12,12 @@ from pyrogram.errors import PeerIdInvalid, RPCError, FloodWait
 from pyrogram.raw import functions, types
 
 from db import get_active_sessions, get_settings
+from queue_handler import mark_task_completed, mark_task_started
 from config import Config
 
+LOGGER = logging.getLogger(__name__)
+
 ban_queue: "asyncio.Queue[Tuple[Any, int]]" = asyncio.Queue()
-QUEUE: List[Tuple[int, str]] = []
-ACTIVE_TASK = False
 
 
 # -----------------------------
@@ -307,6 +310,8 @@ async def _process_one_session(
     target_username: Optional[str],
     fallback_entities: List[Dict[str, Any]],
     fallback_entity_ids: Set[int],
+    verify_enabled: bool,
+    verify_delay: float,
 ) -> Tuple[int, int, Dict[int, Dict[str, Any]]]:
     """
     Returns: (attempts, verified_success, per_chat_metrics)
@@ -316,7 +321,7 @@ async def _process_one_session(
     chat_metrics: Dict[int, Dict[str, Any]] = {}
 
     agent = Client(
-        f"agent_{session_row.get('id') or session_row.get('_id') or session_row.get('name') or id(session_row)}",
+        f"agent_{session_row.get('id') or session_row.get('_id') or session_row.get('name') or uuid.uuid4().hex}",
         session_string=session_row["string"],
         api_id=Config.API_ID,
         api_hash=Config.API_HASH,
@@ -394,9 +399,11 @@ async def _process_one_session(
             except RPCError:
                 continue
 
-            if await is_user_banned(agent, dialog.chat.id, resolved_id):
-                verified += 1
-                chat_data["verified"] += 1
+            if verify_enabled:
+                await asyncio.sleep(max(0.0, verify_delay))
+                if await is_user_banned(agent, dialog.chat.id, resolved_id):
+                    verified += 1
+                    chat_data["verified"] += 1
 
     finally:
         try:
@@ -409,14 +416,17 @@ async def _process_one_session(
 
 async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
     """
-    Queue worker. Run multiple workers via start_preban_workers(...).
+    Queue worker. Run multiple workers via start_preban_workers.
     session_concurrency limits how many sessions run in parallel per ban request.
     """
     while True:
         target_info, requester_id = await ban_queue.get()
+        start_time = time.time()
 
         conf = await get_settings()
         log_group = conf.get("log_group")
+        verify_enabled = conf.get("verify_enabled", True)
+        verify_delay = float(conf.get("verify_delay", 1))
 
         all_sessions = await get_active_sessions()
 
@@ -452,63 +462,72 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     target_username,
                     fallback_entities,
                     fallback_entity_ids,
+                    verify_enabled,
+                    verify_delay,
                 )
-
-        tasks = [asyncio.create_task(run_one(s)) for s in all_sessions]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for r in results:
-            if isinstance(r, Exception):
-                continue
-            a, v, per_chat = r
-            attempt_count += a
-            success_count += v
-            for cid, data in per_chat.items():
-                agg = chat_metrics.setdefault(
-                    cid,
-                    {"title": data.get("title"), "attempts": 0, "bans": 0, "verified": 0},
-                )
-                agg["attempts"] += data.get("attempts", 0)
-                agg["bans"] += data.get("bans", 0)
-                agg["verified"] += data.get("verified", 0)
-
-        # Notify
-        metrics_block = format_chat_metrics(chat_metrics)
-        if metrics_block:
-            metrics_block = f"\n\n**Per-chat Metrics**\n{metrics_block}"
 
         target_label = target_id if target_id is not None else (target_username or "unknown")
+        await mark_task_started(str(target_label))
+        try:
+            try:
+                tasks = [asyncio.create_task(run_one(s)) for s in all_sessions]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception:
+                LOGGER.exception("Failed to run pre-ban tasks.")
+                results = []
 
-        if log_group:
+            for r in results:
+                if isinstance(r, Exception):
+                    LOGGER.exception("Pre-ban session failed.")
+                    continue
+                a, v, per_chat = r
+                attempt_count += a
+                success_count += v
+                for cid, data in per_chat.items():
+                    agg = chat_metrics.setdefault(
+                        cid,
+                        {"title": data.get("title"), "attempts": 0, "bans": 0, "verified": 0},
+                    )
+                    agg["attempts"] += data.get("attempts", 0)
+                    agg["bans"] += data.get("bans", 0)
+                    agg["verified"] += data.get("verified", 0)
+
+            # Notify
+            metrics_block = format_chat_metrics(chat_metrics)
+            if metrics_block:
+                metrics_block = f"\n\n**Per-chat Metrics**\n{metrics_block}"
+
+            if log_group:
+                try:
+                    await bot.send_message(
+                        log_group,
+                        "🛡 **Pre-Ban Done**"
+                        f"\nTarget: `{target_label}`"
+                        f"\nSessions Used: {session_count}"
+                        f"\nAttempts: {attempt_count}"
+                        f"\nTotal Verified Bans: {success_count}"
+                        f"\nBy: `{requester_id}`"
+                        f"{metrics_block}",
+                    )
+                except Exception:
+                    LOGGER.exception("Failed to send log group report.")
+
             try:
                 await bot.send_message(
-                    log_group,
-                    "🛡 **Pre-Ban Done**"
+                    requester_id,
+                    "✅ Pre-ban finished"
                     f"\nTarget: `{target_label}`"
                     f"\nSessions Used: {session_count}"
                     f"\nAttempts: {attempt_count}"
                     f"\nTotal Verified Bans: {success_count}"
-                    f"\nBy: `{requester_id}`"
                     f"{metrics_block}",
                 )
             except Exception:
-                pass
-
-        try:
-            await bot.send_message(
-                requester_id,
-                "✅ Pre-ban finished"
-                f"\nTarget: `{target_label}`"
-                f"\nSessions Used: {session_count}"
-                f"\nAttempts: {attempt_count}"
-                f"\nTotal Verified Bans: {success_count}"
-                f"{metrics_block}",
-            )
-        except Exception:
-            pass
-
-        ban_queue.task_done()
-        await asyncio.sleep(2)  # cooldown
+                LOGGER.exception("Failed to send requester report.")
+        finally:
+            await mark_task_completed(str(target_label), time.time() - start_time)
+            ban_queue.task_done()
+            await asyncio.sleep(2)  # cooldown
 
 
 def start_preban_workers(bot, *, num_workers: int = 2, session_concurrency: int = 3) -> List[asyncio.Task]:
