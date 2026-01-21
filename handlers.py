@@ -40,7 +40,9 @@ COMMANDS = [
     "set_session",
     "health",
 ]
-GROUP_FILTER = filters.group | filters.supergroup
+GROUP_FILTER = filters.group
+if hasattr(filters, "supergroup"):
+    GROUP_FILTER |= filters.supergroup
 ANON_COMMAND_MESSAGE = "⚠️ Disable anonymous admin / send command in DM."
 
 
