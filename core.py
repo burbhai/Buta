@@ -81,10 +81,10 @@ async def ensure_entity(agent, target_id, target_username):
                 user = await agent.get_users(resolved_username)
                 return user.id, user.username or resolved_username
             except RPCError:
-                return None, resolved_username
+                return resolved_id, resolved_username
     except RPCError:
-        return None, resolved_username
-    return None, resolved_username
+        return resolved_id, resolved_username
+    return resolved_id, resolved_username
 
 async def is_user_banned(agent, chat_id, target_id):
     try:
