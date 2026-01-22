@@ -39,27 +39,29 @@ async def _safe_reply(message, text: str) -> None:
 
 @bot.on_message(filters.text & filters.group)
 async def auto_session_val(client, message):
+    """Auto-validate session strings posted in the configured session group."""
     try:
         if not message.from_user or not message.text:
             return
         conf = await get_settings()
-        if message.chat.id == conf.get("session_group") and message.from_user.id in Config.OWNERS:
-            if await save_session(message.text.strip()):
-                active_sessions = await get_active_sessions()
-                await _safe_reply(
-                    message,
-                    "✅ Session Valid: added.\n"
-                    f"📊 Active Sessions: {len(active_sessions)}",
-                )
-            else:
-                await _safe_reply(message, "❌ Invalid Session.")
+        if message.chat.id != conf.get("session_group"):
+            return
+        if await save_session(message.text.strip()):
+            active_sessions = await get_active_sessions()
+            await _safe_reply(
+                message,
+                "✅ Session added successfully.\n"
+                f"📊 Active Sessions: {len(active_sessions)}",
+            )
+        else:
+            await _safe_reply(message, "❌ Session invalid or expired. Try again.")
     except FloodWait as e:
         await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
     except RPCError:
-        await _safe_reply(message, "❌ Failed to validate session.")
+        await _safe_reply(message, "❌ Session invalid or expired. Try again.")
     except Exception:
         LOGGER.exception("Auto session validation failed.")
-        await _safe_reply(message, "❌ Failed to validate session.")
+        await _safe_reply(message, "❌ Session invalid or expired. Try again.")
 
 
 async def _wait_for_db_ready() -> None:
@@ -117,6 +119,9 @@ async def main():
     await ensure_indexes()
     LOGGER.info("Database indexes ensured.")
     await test_all_sessions()
+    active_sessions = await get_active_sessions()
+    if not active_sessions:
+        LOGGER.warning("⚠️ No sessions loaded yet.")
     monitor_task = start_queue_monitor(ban_queue)
     LOGGER.info("Queue monitor started.")
     worker_tasks = start_preban_workers(
