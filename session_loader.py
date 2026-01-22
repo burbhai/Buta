@@ -29,6 +29,7 @@ async def validate_session(session_string: str) -> bool:
 
 async def save_session(session_string: str) -> bool:
     """Validate and upsert a session as active."""
+    me = None
     try:
         async with Client(
             name=f"session_save_{uuid.uuid4().hex}",
@@ -40,7 +41,31 @@ async def save_session(session_string: str) -> bool:
         await add_session(session_string, me.first_name, me.phone_number or str(me.id))
         return True
     except RPCError:
+        identifier = None
+        if me:
+            identifier = me.phone_number or str(me.id)
+        LOGGER.error("RPC error while saving session for %s.", identifier or "unknown user")
         return False
     except Exception:
         LOGGER.exception("Failed to save session.")
         return False
+
+
+async def test_all_sessions() -> None:
+    """Validate existing sessions and deactivate invalid ones."""
+    from db import deactivate_session, get_active_sessions
+
+    sessions = await get_active_sessions()
+    if not sessions:
+        LOGGER.info("No active sessions found for validation.")
+        return
+    for row in sessions:
+        session_string = row.get("string")
+        phone = row.get("phone") or row.get("name") or "unknown"
+        if not session_string:
+            LOGGER.warning("Session missing string for %s.", phone)
+            continue
+        ok = await validate_session(session_string)
+        if not ok:
+            LOGGER.warning("Deactivating invalid session for %s.", phone)
+            await deactivate_session(phone)

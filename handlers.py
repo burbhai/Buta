@@ -28,12 +28,15 @@ LOVE_TRACKER = {}
 LOGGER = logging.getLogger(__name__)
 COMMANDS = [
     "start",
+    "help",
+    "ping",
     "preban",
     "status",
     "addsession",
     "addsudo",
     "remsudo",
     "verify",
+    "set",
     "verify_delay",
     "manage",
     "set_log",
@@ -44,14 +47,18 @@ COMMAND_PREFIXES = Config.COMMAND_PREFIXES
 GROUP_FILTER = filters.group
 if hasattr(filters, "supergroup"):
     GROUP_FILTER |= filters.supergroup
-ANON_COMMAND_MESSAGE = "⚠️ Disable anonymous admin / send command in DM."
+ANON_COMMAND_MESSAGE = (
+    "⚠️ Anonymous admin commands are not supported. Disable anonymous admin or DM the bot."
+)
 
 
 def command_filter(commands):
+    """Build command filter with configured prefixes."""
     return filters.command(commands, prefixes=COMMAND_PREFIXES)
 
 
 async def _safe_reply(message: types.Message, text: str, reply_markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
+    """Safely reply to a message with fallback send_message."""
     try:
         await message.reply(text, reply_markup=reply_markup)
     except Exception:
@@ -63,6 +70,7 @@ async def _safe_reply(message: types.Message, text: str, reply_markup: Optional[
 
 
 async def _safe_edit(cb: types.CallbackQuery, text: str, reply_markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
+    """Safely edit callback messages with fallback reply."""
     try:
         await cb.message.edit_text(text, reply_markup=reply_markup)
     except Exception:
@@ -83,6 +91,7 @@ async def _answer_cb(
     *,
     show_alert: bool = False,
 ) -> None:
+    """Answer a callback query with optional text."""
     try:
         if text is None:
             await cb.answer()
@@ -93,6 +102,7 @@ async def _answer_cb(
 
 
 def _log_command_update(message: types.Message) -> None:
+    """Log raw command updates for debugging."""
     from_user_id = message.from_user.id if message.from_user else None
     sender_chat_id = message.sender_chat.id if message.sender_chat else None
     text = message.text or message.caption
@@ -107,10 +117,33 @@ def _log_command_update(message: types.Message) -> None:
 
 
 async def _reject_anonymous_command(message: types.Message) -> bool:
+    """Reject commands sent via anonymous admin or sender_chat."""
     if message.from_user is None or message.sender_chat is not None:
         await _safe_reply(message, ANON_COMMAND_MESSAGE)
         return True
     return False
+
+
+def _log_command_invocation(message: types.Message, command: str) -> None:
+    """Log who invoked a command."""
+    user_id = message.from_user.id if message.from_user else None
+    LOGGER.info(
+        "Command invoked: %s by user_id=%s chat_id=%s chat_type=%s",
+        command,
+        user_id,
+        message.chat.id,
+        message.chat.type,
+    )
+
+
+async def _require_owner(message: types.Message) -> bool:
+    """Return True if the sender is an owner; otherwise send a warning."""
+    if await _reject_anonymous_command(message):
+        return False
+    if not message.from_user or message.from_user.id not in Config.OWNERS:
+        await _safe_reply(message, "❌ This command is restricted to owners.")
+        return False
+    return True
 
 
 async def _resolve_user_id(client, raw: str) -> Tuple[Optional[int], Optional[str]]:
@@ -206,19 +239,39 @@ def _owner_action_keyboard(action: str) -> types.InlineKeyboardMarkup:
     )
 
 
+def _help_keyboard() -> types.InlineKeyboardMarkup:
+    """Return help shortcut buttons for owners."""
+    return types.InlineKeyboardMarkup(
+        [
+            [
+                types.InlineKeyboardButton("✅ Verify On", callback_data="help_verify_on"),
+                types.InlineKeyboardButton("🛑 Verify Off", callback_data="help_verify_off"),
+            ],
+            [types.InlineKeyboardButton("📥 Manage Sessions", callback_data="help_manage")],
+            [types.InlineKeyboardButton("🔙 Back", callback_data="home")],
+        ]
+    )
+
+
 def _dm_only_message() -> str:
+    """Return a DM-only warning string."""
     return "⚠️ This feature is available in private chat. Please DM the bot."
 
 
 @bot.on_message(command_filter(COMMANDS))
 async def log_commands(bot, message):
+    """Log command traffic for debugging."""
     _log_command_update(message)
 
 
 @bot.on_message(command_filter(COMMANDS) & GROUP_FILTER)
 async def reject_anonymous_group_commands(bot, message):
+    """Reject anonymous admin commands in groups."""
     if await _reject_anonymous_command(message):
         return
+
+
+# BotFather privacy mode must be disabled so the bot can read group commands.
 
 
 @bot.on_message(
@@ -241,6 +294,7 @@ async def reject_anonymous_group_commands(bot, message):
     & filters.channel
 )
 async def channel_command_redirect(bot, message):
+    """Redirect channel command usage to DM."""
     try:
         if await _reject_anonymous_command(message):
             return
@@ -248,13 +302,73 @@ async def channel_command_redirect(bot, message):
     except Exception:
         LOGGER.exception("Channel redirect handler failed.")
 
-@bot.on_message(command_filter("start") & (filters.private | GROUP_FILTER))
-async def start(bot, message):
+@bot.on_message(command_filter("ping") & (filters.private | GROUP_FILTER))
+async def ping_command(bot, message):
+    """Respond to /ping for responsiveness checks."""
     try:
         if await _reject_anonymous_command(message):
             return
+        _log_command_invocation(message, "ping")
+        await _safe_reply(message, "🏓 Pong!")
+    except Exception:
+        LOGGER.exception("Ping command failed.")
+        await _safe_reply(message, "❌ Failed to respond to ping.")
+
+
+@bot.on_message(command_filter("help") & (filters.private | GROUP_FILTER))
+async def help_command(bot, message):
+    """Show help information and shortcuts."""
+    try:
+        if await _reject_anonymous_command(message):
+            return
+        _log_command_invocation(message, "help")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
+        text = (
+            "🆘 **Help Menu**\n\n"
+            "Common commands:\n"
+            "• /ping - Check if bot is alive\n"
+            "• /preban <user_id or @username> - Queue a pre-ban\n"
+            "• /status - Queue status\n\n"
+        )
+        if is_owner:
+            text += (
+                "Owner commands:\n"
+                "• /addsession <session_string>\n"
+                "• /addsudo <user_id or @username>\n"
+                "• /remsudo <user_id or @username>\n"
+                "• /verify <on|off>\n"
+                "• /verify_delay <seconds>\n"
+                "• /manage - List sessions\n"
+                "• /set <key> <value> - Configure defaults\n"
+            )
+        elif has_sudo:
+            text += "You have sudo access. Use **Send Love** to submit targets."
+        else:
+            text += "You do not have sudo access yet. Submit payment proof to gain access."
+        markup = _help_keyboard() if is_owner else None
+        await _safe_reply(message, text, reply_markup=markup)
+    except Exception:
+        LOGGER.exception("Help command failed.")
+        await _safe_reply(message, "❌ Failed to load help information.")
+
+@bot.on_message(command_filter("start") & (filters.private | GROUP_FILTER))
+async def start(bot, message):
+    """Handle /start for onboarding."""
+    try:
+        if await _reject_anonymous_command(message):
+            return
+        _log_command_invocation(message, "start")
+        is_owner = message.from_user.id in Config.OWNERS
+        has_sudo = is_owner or await has_access(message.from_user.id)
+        if message.chat.type == "private":
+            intro = (
+                "👋 **Welcome!**\n\n"
+                "Use /help to see available commands, or tap the buttons below.\n"
+                "To send a pre-ban request, use **Send Love** or /preban.\n"
+            )
+        else:
+            intro = "👋 **Welcome!**\n\nPlease DM me for full instructions."
         if is_owner:
             title = "👑 **Owner Panel**"
             body = (
@@ -271,7 +385,7 @@ async def start(bot, message):
             )
         await _safe_reply(
             message,
-            f"{title}\n\n{body}",
+            f"{intro}\n{title}\n\n{body}",
             reply_markup=_start_keyboard(is_owner, has_sudo),
         )
     except Exception:
@@ -280,6 +394,7 @@ async def start(bot, message):
 
 @bot.on_callback_query(filters.regex(r"^home$") & filters.private)
 async def go_home(bot, cb):
+    """Return to home screen in callbacks."""
     try:
         if not cb.from_user:
             return
@@ -311,6 +426,7 @@ async def go_home(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^payment_info$") & filters.private)
 async def payment_info(bot, cb):
+    """Show payment info screen."""
     try:
         await _answer_cb(cb)
         await _safe_edit(
@@ -326,6 +442,7 @@ async def payment_info(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^payment_how$") & filters.private)
 async def payment_how(bot, cb):
+    """Show payment submission instructions."""
     try:
         await _answer_cb(cb)
         await _safe_edit(
@@ -340,6 +457,7 @@ async def payment_how(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^love_send$") & filters.private)
 async def love_send(bot, cb):
+    """Start sudo pre-ban flow via button."""
     try:
         if not cb.from_user:
             return
@@ -367,6 +485,7 @@ async def love_send(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_panel$") & filters.private)
 async def owner_panel(bot, cb):
+    """Render owner panel screen."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -384,6 +503,7 @@ async def owner_panel(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_add_sudo$") & filters.private)
 async def owner_add_sudo(bot, cb):
+    """Start add sudo flow."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -401,6 +521,7 @@ async def owner_add_sudo(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_remove_sudo$") & filters.private)
 async def owner_remove_sudo(bot, cb):
+    """Start remove sudo flow."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -418,6 +539,7 @@ async def owner_remove_sudo(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_add_sudo_prompt$") & filters.private)
 async def owner_add_prompt(bot, cb):
+    """Prompt for sudo user identifier."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -435,6 +557,7 @@ async def owner_add_prompt(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_remove_sudo_prompt$") & filters.private)
 async def owner_remove_prompt(bot, cb):
+    """Prompt to remove sudo user."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -452,6 +575,7 @@ async def owner_remove_prompt(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_sudo_list$") & filters.private)
 async def owner_sudo_list(bot, cb):
+    """Display active sudo users."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -470,6 +594,7 @@ async def owner_sudo_list(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_manage_sessions$") & filters.private)
 async def owner_manage_sessions(bot, cb):
+    """Display session management list."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -489,6 +614,7 @@ async def owner_manage_sessions(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_set_log$") & filters.private)
 async def owner_set_log_cb(bot, cb):
+    """Set log group from callback."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -506,6 +632,7 @@ async def owner_set_log_cb(bot, cb):
 
 @bot.on_callback_query(filters.regex(r"^owner_set_session$") & filters.private)
 async def owner_set_session_cb(bot, cb):
+    """Set session validation group from callback."""
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -521,27 +648,76 @@ async def owner_set_session_cb(bot, cb):
         LOGGER.exception("Owner set session handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_message(command_filter("set_log") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
-async def set_log_group(bot, message):
+
+@bot.on_callback_query(filters.regex(r"^help_verify_(on|off)$") & filters.private)
+async def help_verify_toggle(bot, cb):
+    """Handle verify toggle from help buttons."""
     try:
+        if not cb.from_user or cb.from_user.id not in Config.OWNERS:
+            await _answer_cb(cb, "Owner only.", show_alert=True)
+            return
+        await _answer_cb(cb)
+        mode = cb.matches[0].group(1)
+        await update_setting("verify_enabled", mode == "on")
+        await _safe_edit(cb, f"✅ Verification mode set to {mode}.", reply_markup=_help_keyboard())
+    except Exception:
+        LOGGER.exception("Help verify toggle failed.")
+        await _safe_edit(cb, "❌ Failed to update verification mode.")
+
+
+@bot.on_callback_query(filters.regex(r"^help_manage$") & filters.private)
+async def help_manage_sessions(bot, cb):
+    """Shortcut to manage sessions from help buttons."""
+    try:
+        if not cb.from_user or cb.from_user.id not in Config.OWNERS:
+            await _answer_cb(cb, "Owner only.", show_alert=True)
+            return
+        await _answer_cb(cb)
+        all_s = await get_active_sessions()
+        text = f"📑 **Active Sessions ({len(all_s)}):**\n\n"
+        kb = []
+        for s in all_s:
+            text += f"👤 {s['name']} ({s['phone']})\n"
+            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=f"rem_{s['phone']}")])
+        kb.append([types.InlineKeyboardButton("🔙 Back", callback_data="home")])
+        await _safe_edit(cb, text, reply_markup=types.InlineKeyboardMarkup(kb))
+    except Exception:
+        LOGGER.exception("Help manage sessions failed.")
+        await _safe_edit(cb, "❌ Failed to load sessions.")
+
+@bot.on_message(command_filter("set_log") & (filters.private | GROUP_FILTER))
+async def set_log_group(bot, message):
+    """Set log group with /set_log."""
+    try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "set_log")
         await update_setting("log_group", message.chat.id)
         await _safe_reply(message, "✅ This group is now the **Log Group**.")
     except Exception:
         LOGGER.exception("Set log command failed.")
         await _safe_reply(message, "❌ Failed to set log group.")
 
-@bot.on_message(command_filter("set_session") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("set_session") & (filters.private | GROUP_FILTER))
 async def set_session_group(bot, message):
+    """Set session group with /set_session."""
     try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "set_session")
         await update_setting("session_group", message.chat.id)
         await _safe_reply(message, "✅ This group is now the **Session Validation Group**.")
     except Exception:
         LOGGER.exception("Set session command failed.")
         await _safe_reply(message, "❌ Failed to set session group.")
 
-@bot.on_message(command_filter("manage") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("manage") & (filters.private | GROUP_FILTER))
 async def manage_sessions(bot, message):
+    """List active sessions via /manage."""
     try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "manage")
         all_s = await get_active_sessions()
         text = f"📑 **Active Sessions ({len(all_s)}):**\n\n"
         kb = []
@@ -549,14 +725,19 @@ async def manage_sessions(bot, message):
             text += f"👤 {s['name']} ({s['phone']})\n"
             kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=f"rem_{s['phone']}")])
 
+        kb.append([types.InlineKeyboardButton("🆘 Help", callback_data="home")])
         await _safe_reply(message, text, reply_markup=types.InlineKeyboardMarkup(kb))
     except Exception:
         LOGGER.exception("Manage sessions command failed.")
         await _safe_reply(message, "❌ Failed to load sessions.")
 
-@bot.on_callback_query(filters.regex(r"^rem_(.+)$") & filters.user(Config.OWNERS))
+@bot.on_callback_query(filters.regex(r"^rem_(.+)$"))
 async def remove_session(bot, cb):
+    """Remove a session from callback action."""
     try:
+        if not cb.from_user or cb.from_user.id not in Config.OWNERS:
+            await _answer_cb(cb, "Owner only.", show_alert=True)
+            return
         await _answer_cb(cb)
         phone = cb.matches[0].group(1)
         await deactivate_session(phone)
@@ -621,10 +802,11 @@ async def handle_text_messages(bot, message):
 
 @bot.on_message(command_filter("preban") & (filters.private | GROUP_FILTER))
 async def preban_user(bot, message):
+    """Queue a pre-ban request via /preban."""
     try:
         if await _reject_anonymous_command(message):
             return
-
+        _log_command_invocation(message, "preban")
         is_owner = message.from_user.id in Config.OWNERS
         if not is_owner and not await has_access(message.from_user.id):
             await _safe_reply(message, "❌ You are not authorized. Send payment proof to get access.")
@@ -654,9 +836,11 @@ async def preban_user(bot, message):
 
 @bot.on_message(command_filter("status") & (filters.private | GROUP_FILTER))
 async def status_command(bot, message):
+    """Show queue status with /status."""
     try:
         if await _reject_anonymous_command(message):
             return
+        _log_command_invocation(message, "status")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
         if not has_sudo:
@@ -669,9 +853,13 @@ async def status_command(bot, message):
         await _safe_reply(message, "❌ Failed to get queue status.")
 
 
-@bot.on_message(command_filter("health") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("health") & (filters.private | GROUP_FILTER))
 async def health_command(bot, message):
+    """Show health snapshot for owners."""
     try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "health")
         db_ok = await check_db_health()
         sessions = await get_active_sessions()
         queue_snapshot = await get_queue_snapshot()
@@ -691,9 +879,13 @@ async def health_command(bot, message):
         await _safe_reply(message, "❌ Failed to collect health status.")
 
 
-@bot.on_message(command_filter("addsession") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("addsession") & (filters.private | GROUP_FILTER))
 async def add_session_command(bot, message):
+    """Add a session string to the database."""
     try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "addsession")
         if len(message.command) < 2:
             await _safe_reply(message, "Usage: /addsession <session_string>")
             return
@@ -719,9 +911,13 @@ async def add_session_command(bot, message):
         await _safe_reply(message, "❌ Failed to add session.")
 
 
-@bot.on_message(command_filter("addsudo") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("addsudo") & (filters.private | GROUP_FILTER))
 async def add_sudo_command(bot, message):
+    """Grant sudo access to a user."""
     try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "addsudo")
         if len(message.command) < 2:
             await _safe_reply(message, "Usage: /addsudo <user_id or @username>")
             return
@@ -736,9 +932,13 @@ async def add_sudo_command(bot, message):
         await _safe_reply(message, "❌ Failed to add sudo user.")
 
 
-@bot.on_message(command_filter("remsudo") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("remsudo") & (filters.private | GROUP_FILTER))
 async def remove_sudo_command(bot, message):
+    """Revoke sudo access from a user."""
     try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "remsudo")
         if len(message.command) < 2:
             await _safe_reply(message, "Usage: /remsudo <user_id or @username>")
             return
@@ -753,15 +953,19 @@ async def remove_sudo_command(bot, message):
         await _safe_reply(message, "❌ Failed to remove sudo user.")
 
 
-@bot.on_message(command_filter("verify") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("verify") & (filters.private | GROUP_FILTER))
 async def set_verify_mode(bot, message):
+    """Toggle verify mode on or off."""
     try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "verify")
         if len(message.command) < 2:
-            await _safe_reply(message, "Usage: /verify <on|off>")
+            await _safe_reply(message, "Usage: /verify <on|off>", reply_markup=_help_keyboard())
             return
         mode = message.command[1].lower()
         if mode not in {"on", "off"}:
-            await _safe_reply(message, "Usage: /verify <on|off>")
+            await _safe_reply(message, "Usage: /verify <on|off>", reply_markup=_help_keyboard())
             return
         await update_setting("verify_enabled", mode == "on")
         await _safe_reply(message, f"✅ Verification mode set to {mode}.")
@@ -770,9 +974,13 @@ async def set_verify_mode(bot, message):
         await _safe_reply(message, "❌ Failed to update verification mode.")
 
 
-@bot.on_message(command_filter("verify_delay") & filters.user(Config.OWNERS) & (filters.private | GROUP_FILTER))
+@bot.on_message(command_filter("verify_delay") & (filters.private | GROUP_FILTER))
 async def set_verify_delay(bot, message):
+    """Set verification delay for bans."""
     try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "verify_delay")
         if len(message.command) < 2:
             await _safe_reply(message, "Usage: /verify_delay <seconds>")
             return
@@ -789,3 +997,50 @@ async def set_verify_delay(bot, message):
     except Exception:
         LOGGER.exception("Verify delay command failed.")
         await _safe_reply(message, "❌ Failed to update verification delay.")
+
+
+@bot.on_message(command_filter("set") & (filters.private | GROUP_FILTER))
+async def set_command(bot, message):
+    """Update configurable defaults via /set."""
+    try:
+        if not await _require_owner(message):
+            return
+        _log_command_invocation(message, "set")
+        if len(message.command) < 3:
+            await _safe_reply(
+                message,
+                "Usage:\n"
+                "/set default_duration <hours>\n"
+                "/set approval_text <text>\n"
+                "/set approval_durations <comma-separated hours>",
+            )
+            return
+        key = message.command[1].lower()
+        value = " ".join(message.command[2:])
+        if key == "default_duration":
+            try:
+                hours = int(value)
+            except ValueError:
+                await _safe_reply(message, "❌ default_duration must be a number of hours.")
+                return
+            await update_setting("default_duration", hours)
+            await _safe_reply(message, f"✅ Default approval duration set to {hours}h.")
+            return
+        if key == "approval_text":
+            await update_setting("approval_text", value.strip())
+            await _safe_reply(message, "✅ Approval text updated.")
+            return
+        if key == "approval_durations":
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            try:
+                durations = [int(p) for p in parts]
+            except ValueError:
+                await _safe_reply(message, "❌ approval_durations must be comma-separated integers.")
+                return
+            await update_setting("approval_durations", durations)
+            await _safe_reply(message, f"✅ Approval durations set to: {', '.join(map(str, durations))}h.")
+            return
+        await _safe_reply(message, "❌ Unknown setting key. Use /set for usage.")
+    except Exception:
+        LOGGER.exception("Set command failed.")
+        await _safe_reply(message, "❌ Failed to update settings.")
