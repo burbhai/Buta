@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import Optional, Tuple
 
-from pyrogram import Client, filters, types
+from pyrogram import Client, StopPropagation, filters, types
 from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait, RPCError
 
@@ -25,7 +26,9 @@ from db import (
 )
 from queue_handler import get_queue_snapshot, get_queue_status
 
-LOVE_TRACKER = {}
+LOVE_TRACKER: dict[int, dict[str, float | str]] = {}
+LOVE_TRACKER_TTL_SECONDS = 600
+REMOVE_SESSION_TOKENS: dict[str, str] = {}
 LOGGER = logging.getLogger(__name__)
 COMMANDS = [
     "start",
@@ -72,15 +75,48 @@ def _has_handler(app: Client, callback_names: set[str]) -> bool:
 def register_handlers(app: Client) -> None:
     """Register handlers and fallback commands."""
     LOGGER.info("Registering handlers.")
-    if not _has_handler(app, {"start"}):
+    if not _has_handler(app, {"start", "start_handler"}):
         @app.on_message(filters.command("start") & (filters.private | GROUP_FILTER))
         async def start_handler(client, message):
             await message.reply("✅ Bot is alive.")
-    if not _has_handler(app, {"ping_command"}):
+    if not _has_handler(app, {"ping_command", "ping_handler"}):
         @app.on_message(filters.command("ping") & (filters.private | GROUP_FILTER))
         async def ping_handler(client, message):
             await message.reply("✅ Bot is alive.")
     LOGGER.info("Handlers registered.")
+
+def _cleanup_love_tracker(now: Optional[float] = None) -> None:
+    """Remove expired love tracker states."""
+    current_time = time.time() if now is None else now
+    expired = [
+        user_id
+        for user_id, entry in LOVE_TRACKER.items()
+        if current_time - float(entry.get("updated_at", 0)) > LOVE_TRACKER_TTL_SECONDS
+    ]
+    for user_id in expired:
+        LOVE_TRACKER.pop(user_id, None)
+
+def _set_love_state(user_id: int, state: str) -> None:
+    """Store love tracker state with timestamp."""
+    _cleanup_love_tracker()
+    LOVE_TRACKER[user_id] = {"state": state, "updated_at": time.time()}
+
+def _get_love_state(user_id: int) -> Optional[str]:
+    """Fetch love tracker state if not expired."""
+    _cleanup_love_tracker()
+    entry = LOVE_TRACKER.get(user_id)
+    if not entry:
+        return None
+    updated_at = float(entry.get("updated_at", 0))
+    if time.time() - updated_at > LOVE_TRACKER_TTL_SECONDS:
+        LOVE_TRACKER.pop(user_id, None)
+        return None
+    entry["updated_at"] = time.time()
+    return str(entry.get("state"))
+
+def _clear_love_state(user_id: int) -> None:
+    """Clear stored love tracker state."""
+    LOVE_TRACKER.pop(user_id, None)
 
 async def _get_session_count() -> int:
     """Return the active session count, falling back safely on errors."""
@@ -99,7 +135,7 @@ async def _safe_reply(message: types.Message, text: str, reply_markup: Optional[
     except Exception:
         LOGGER.exception("Failed to reply to message.")
         try:
-            await message._client.send_message(message.chat.id, text, reply_markup=reply_markup)
+            await bot.send_message(message.chat.id, text, reply_markup=reply_markup)
         except Exception:
             LOGGER.exception("Failed to send fallback reply.")
 
@@ -115,7 +151,7 @@ async def _safe_edit(cb: types.CallbackQuery, text: str, reply_markup: Optional[
         except Exception:
             LOGGER.exception("Failed to send fallback reply.")
             try:
-                await cb.message._client.send_message(cb.message.chat.id, text, reply_markup=reply_markup)
+                await bot.send_message(cb.message.chat.id, text, reply_markup=reply_markup)
             except Exception:
                 LOGGER.exception("Failed to send fallback fallback reply.")
 
@@ -296,6 +332,21 @@ def _dm_only_message() -> str:
     """Return a DM-only warning string."""
     return "⚠️ This feature is available in private chat. Please DM the bot."
 
+def _build_remove_session_callback(phone: str) -> str:
+    """Build callback data for removing a session with length safety."""
+    safe_phone = phone.strip()
+    prefix = "rem_"
+    max_length = 64
+    if len(prefix) + len(safe_phone) <= max_length:
+        return f"{prefix}{safe_phone}"
+    token = uuid.uuid4().hex[:12]
+    REMOVE_SESSION_TOKENS[token] = safe_phone
+    return f"{prefix}{token}"
+
+def _resolve_remove_session_target(token: str) -> str:
+    """Resolve callback token back to the phone identifier."""
+    return REMOVE_SESSION_TOKENS.pop(token, token)
+
 def _build_help_text(is_owner: bool, has_sudo: bool) -> str:
     """Build help text for /help and inline help callbacks."""
     text = (
@@ -349,7 +400,7 @@ async def log_commands(bot, message):
 async def reject_anonymous_group_commands(bot, message):
     """Reject anonymous admin commands in groups."""
     if await _reject_anonymous_command(message):
-        return
+        raise StopPropagation
 
 
 # BotFather privacy mode must be disabled so the bot can read group commands.
@@ -377,8 +428,6 @@ async def reject_anonymous_group_commands(bot, message):
 async def channel_command_redirect(bot, message):
     """Redirect channel command usage to DM."""
     try:
-        if await _reject_anonymous_command(message):
-            return
         await _safe_reply(message, _dm_only_message())
     except Exception:
         LOGGER.exception("Channel redirect handler failed.")
@@ -570,7 +619,7 @@ async def love_send(bot, cb):
         if not await _validate_single_session_for_preban(cb):
             return
         await _answer_cb(cb)
-        LOVE_TRACKER[cb.from_user.id] = "awaiting_target"
+        _set_love_state(cb.from_user.id, "awaiting_target")
         await _safe_edit(
             cb,
             "💌 **Send Love**\n\n"
@@ -643,7 +692,7 @@ async def owner_add_prompt(bot, cb):
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
-        LOVE_TRACKER[cb.from_user.id] = "owner_add_sudo"
+        _set_love_state(cb.from_user.id, "owner_add_sudo")
         await _safe_edit(
             cb,
             "🆔 **Send User ID or @username** to grant sudo access.",
@@ -661,7 +710,7 @@ async def owner_remove_prompt(bot, cb):
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
-        LOVE_TRACKER[cb.from_user.id] = "owner_remove_sudo"
+        _set_love_state(cb.from_user.id, "owner_remove_sudo")
         await _safe_edit(
             cb,
             "🆔 **Send User ID or @username** to revoke sudo access.",
@@ -703,7 +752,8 @@ async def owner_manage_sessions(bot, cb):
         kb = []
         for s in all_s:
             text += f"👤 {s['name']} ({s['phone']})\n"
-            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=f"rem_{s['phone']}")])
+            callback_data = _build_remove_session_callback(s["phone"])
+            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
         kb.append([types.InlineKeyboardButton("🔙 Back", callback_data="owner_panel")])
         await _safe_edit(cb, text, reply_markup=types.InlineKeyboardMarkup(kb))
     except Exception:
@@ -776,7 +826,8 @@ async def help_manage_sessions(bot, cb):
         kb = []
         for s in all_s:
             text += f"👤 {s['name']} ({s['phone']})\n"
-            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=f"rem_{s['phone']}")])
+            callback_data = _build_remove_session_callback(s["phone"])
+            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
         kb.append([types.InlineKeyboardButton("🔙 Back", callback_data="home")])
         await _safe_edit(cb, text, reply_markup=types.InlineKeyboardMarkup(kb))
     except Exception:
@@ -824,7 +875,8 @@ async def manage_sessions(bot, message):
         kb = []
         for s in all_s:
             text += f"👤 {s['name']} ({s['phone']})\n"
-            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=f"rem_{s['phone']}")])
+            callback_data = _build_remove_session_callback(s["phone"])
+            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
 
         kb.append([types.InlineKeyboardButton("🆘 Help", callback_data="home")])
         await _safe_reply(message, text, reply_markup=types.InlineKeyboardMarkup(kb))
@@ -840,7 +892,8 @@ async def remove_session(bot, cb):
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
-        phone = cb.matches[0].group(1)
+        token = cb.matches[0].group(1)
+        phone = _resolve_remove_session_target(token)
         await deactivate_session(phone)
         await _safe_edit(cb, f"✅ Removed session for {phone}.")
     except Exception:
@@ -852,7 +905,7 @@ async def handle_text_messages(bot, message):
     try:
         if not message.from_user or not message.text:
             return
-        state = LOVE_TRACKER.get(message.from_user.id)
+        state = _get_love_state(message.from_user.id)
         if not state:
             return
         if state in {"owner_add_sudo", "owner_remove_sudo"}:
@@ -871,13 +924,13 @@ async def handle_text_messages(bot, message):
             else:
                 await revoke_access(user_id)
                 await _safe_reply(message, f"✅ Removed `{user_id}` from sudo.", reply_markup=_owner_panel_keyboard())
-            LOVE_TRACKER.pop(message.from_user.id, None)
+            _clear_love_state(message.from_user.id)
             return
         if state == "awaiting_target":
             is_owner = message.from_user.id in Config.OWNERS
             if not is_owner and not await has_access(message.from_user.id):
                 await _safe_reply(message, "❌ You are not authorized. Send payment proof to get access.")
-                LOVE_TRACKER.pop(message.from_user.id, None)
+                _clear_love_state(message.from_user.id)
                 return
             target_id, target_username = await _resolve_user_id(bot, message.text)
             if target_id is None and target_username is None:
@@ -885,7 +938,7 @@ async def handle_text_messages(bot, message):
                 return
             if Config.QUEUE_MAXSIZE > 0 and ban_queue.full():
                 await _safe_reply(message, "⚠️ Queue is full. Please try again in a moment.")
-                LOVE_TRACKER.pop(message.from_user.id, None)
+                _clear_love_state(message.from_user.id)
                 return
             await ban_queue.put(({"id": target_id, "username": target_username}, message.from_user.id))
             queued_label = target_id if target_id is not None else f"@{target_username}"
@@ -896,7 +949,7 @@ async def handle_text_messages(bot, message):
                 "You'll receive results after processing.",
                 reply_markup=_sudo_panel_keyboard(),
             )
-            LOVE_TRACKER.pop(message.from_user.id, None)
+            _clear_love_state(message.from_user.id)
     except Exception:
         LOGGER.exception("Handle text handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
@@ -985,10 +1038,12 @@ async def add_session_command(bot, message):
         if not await _require_owner(message):
             return
         _log_command_invocation(message, "addsession")
-        if len(message.command) < 2:
+        raw_text = message.text or ""
+        parts = raw_text.split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
             await _safe_reply(message, "Usage: /addsession <session_string>")
             return
-        session_string = message.command[1]
+        session_string = parts[1].strip()
         temp = Client(
             f"session_add_{uuid.uuid4().hex}",
             session_string=session_string,
