@@ -4,6 +4,7 @@ import signal
 from typing import Iterable
 
 from pyrogram import filters
+from pyrogram.idle import idle
 from pyrogram.errors import FloodWait, RPCError
 
 from logger_config import configure_logging
@@ -17,7 +18,7 @@ from db import check_db_health, ensure_indexes, get_active_sessions, get_setting
 from queue_handler import start_queue_monitor
 from session_loader import save_session, test_all_sessions
 
-import handlers  # noqa: F401
+from handlers import register_handlers
 import payment_handler  # noqa: F401
 
 LOGGER = logging.getLogger(__name__)
@@ -46,12 +47,18 @@ async def auto_session_val(client, message):
         conf = await get_settings()
         if message.chat.id != conf.get("session_group"):
             return
-        if await save_session(message.text.strip()):
+        result = await save_session(message.text.strip())
+        if result is True:
             active_sessions = await get_active_sessions()
             await _safe_reply(
                 message,
                 "✅ Session added successfully.\n"
                 f"📊 Active Sessions: {len(active_sessions)}",
+            )
+        elif result is None:
+            await _safe_reply(
+                message,
+                "⚠️ Session validated but failed to save. The database may be down.",
             )
         else:
             await _safe_reply(message, "❌ Session invalid or expired. Try again.")
@@ -65,16 +72,8 @@ async def auto_session_val(client, message):
 
 
 async def _wait_for_db_ready() -> None:
-    """Wait for DB connectivity before continuing startup."""
-    attempt = 0
-    while True:
-        ok = await check_db_health()
-        if ok:
-            return
-        attempt += 1
-        delay = min(60, 2**attempt)
-        LOGGER.warning("MongoDB unavailable. Retrying in %s seconds.", delay)
-        await asyncio.sleep(delay)
+    """Ensure DB is available or fallback to in-memory."""
+    await check_db_health()
 
 
 async def _health_logger() -> None:
@@ -111,26 +110,19 @@ def _log_task_exception(task: asyncio.Task) -> None:
     if exc:
         LOGGER.error("Background task failed.", exc_info=exc)
 
+
 async def main():
     """Main async entrypoint for the bot."""
     Config.validate()
     LOGGER.info("Config validation completed.")
+    LOGGER.info("Initializing database connection.")
     await _wait_for_db_ready()
     await ensure_indexes()
     LOGGER.info("Database indexes ensured.")
-    await test_all_sessions()
-    active_sessions = await get_active_sessions()
-    if not active_sessions:
-        LOGGER.warning("⚠️ No sessions loaded yet.")
-    monitor_task = start_queue_monitor(ban_queue)
-    LOGGER.info("Queue monitor started.")
-    worker_tasks = start_preban_workers(
-        bot,
-        num_workers=Config.PREBAN_WORKERS,
-        session_concurrency=Config.SESSION_CONCURRENCY,
-    )
-    LOGGER.info("Pre-ban workers started: %s", len(worker_tasks))
+    register_handlers(bot)
+    LOGGER.info("Handlers registered.")
     await bot.start()
+    LOGGER.info("Bot client started.")
     me = await bot.get_me()
     LOGGER.info(
         "Startup banner: name=%s owner_ids=%s api_id=%s",
@@ -138,17 +130,40 @@ async def main():
         Config.OWNERS,
         Config.API_ID,
     )
-    supervisor = asyncio.create_task(
-        _supervise_workers(
+    await test_all_sessions()
+    active_sessions = await get_active_sessions()
+    if not active_sessions:
+        LOGGER.warning("⚠️ No sessions loaded yet. Waiting for sessions.")
+    monitor_task = start_queue_monitor(ban_queue)
+    LOGGER.info("Queue monitor started.")
+    worker_tasks: list[asyncio.Task] = []
+    supervisor: asyncio.Task | None = None
+    background_tasks = [monitor_task]
+
+    if active_sessions:
+        worker_tasks = start_preban_workers(
             bot,
-            worker_tasks,
             num_workers=Config.PREBAN_WORKERS,
             session_concurrency=Config.SESSION_CONCURRENCY,
         )
-    )
+        LOGGER.info("Pre-ban workers started: %s", len(worker_tasks))
+        supervisor = asyncio.create_task(
+            _supervise_workers(
+                bot,
+                worker_tasks,
+                num_workers=Config.PREBAN_WORKERS,
+                session_concurrency=Config.SESSION_CONCURRENCY,
+            )
+        )
+        background_tasks.extend(worker_tasks)
+        if supervisor:
+            background_tasks.append(supervisor)
+
     health_task = asyncio.create_task(_health_logger())
-    _attach_task_logger([monitor_task, supervisor, health_task, *worker_tasks])
+    background_tasks.append(health_task)
+    _attach_task_logger(background_tasks)
     LOGGER.info("Bot is running.")
+
     stop_event = asyncio.Event()
 
     def _signal_handler() -> None:
@@ -162,11 +177,52 @@ async def main():
         except NotImplementedError:
             pass
 
+    async def _session_watchdog() -> None:
+        """Wait for sessions to be added, then start workers."""
+        nonlocal worker_tasks, supervisor
+        if worker_tasks:
+            return
+        while not stop_event.is_set():
+            try:
+                sessions = await get_active_sessions()
+                if sessions:
+                    LOGGER.info("Sessions detected. Starting pre-ban workers.")
+                    worker_tasks = start_preban_workers(
+                        bot,
+                        num_workers=Config.PREBAN_WORKERS,
+                        session_concurrency=Config.SESSION_CONCURRENCY,
+                    )
+                    supervisor = asyncio.create_task(
+                        _supervise_workers(
+                            bot,
+                            worker_tasks,
+                            num_workers=Config.PREBAN_WORKERS,
+                            session_concurrency=Config.SESSION_CONCURRENCY,
+                        )
+                    )
+                    background_tasks.extend(worker_tasks)
+                    if supervisor:
+                        background_tasks.append(supervisor)
+                    _attach_task_logger(
+                        [*worker_tasks, supervisor] if supervisor else worker_tasks
+                    )
+                    LOGGER.info("Pre-ban workers started: %s", len(worker_tasks))
+                    return
+            except Exception:
+                LOGGER.exception("Session watchdog failed.")
+            await asyncio.sleep(15)
+
+    watchdog_task = asyncio.create_task(_session_watchdog())
+    background_tasks.append(watchdog_task)
+    _attach_task_logger([watchdog_task])
+
     try:
-        await stop_event.wait()
+        await idle()
     finally:
-        for task in [monitor_task, supervisor, health_task, *worker_tasks]:
+        stop_event.set()
+        for task in background_tasks:
             task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
         await bot.stop()
 
 
@@ -204,4 +260,5 @@ async def _supervise_workers(
         await asyncio.sleep(2)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())

@@ -27,7 +27,7 @@ async def validate_session(session_string: str) -> bool:
         return False
 
 
-async def save_session(session_string: str) -> bool:
+async def save_session(session_string: str) -> bool | None:
     """Validate and upsert a session as active."""
     me = None
     try:
@@ -38,7 +38,11 @@ async def save_session(session_string: str) -> bool:
             session_string=session_string,
         ) as app:
             me = await app.get_me()
-        await add_session(session_string, me.first_name, me.phone_number or str(me.id))
+        try:
+            await add_session(session_string, me.first_name, me.phone_number or str(me.id))
+        except Exception:
+            LOGGER.exception("Failed to store session in DB. The database may be unavailable.")
+            return None
         LOGGER.info("Session added for %s.", me.first_name)
         return True
     except RPCError:
@@ -56,7 +60,11 @@ async def test_all_sessions() -> None:
     """Validate existing sessions and deactivate invalid ones."""
     from db import deactivate_session, get_active_sessions
 
-    sessions = await get_active_sessions()
+    try:
+        sessions = await get_active_sessions()
+    except Exception:
+        LOGGER.exception("Failed to load sessions for validation.")
+        return
     if not sessions:
         LOGGER.warning("⚠️ No sessions loaded yet.")
         return
@@ -66,7 +74,14 @@ async def test_all_sessions() -> None:
         if not session_string:
             LOGGER.warning("Session missing string for %s.", phone)
             continue
-        ok = await validate_session(session_string)
+        try:
+            ok = await validate_session(session_string)
+        except Exception:
+            LOGGER.exception("Session validation failed for %s.", phone)
+            continue
         if not ok:
             LOGGER.warning("Deactivating invalid session for %s.", phone)
-            await deactivate_session(phone)
+            try:
+                await deactivate_session(phone)
+            except Exception:
+                LOGGER.exception("Failed to deactivate invalid session for %s.", phone)

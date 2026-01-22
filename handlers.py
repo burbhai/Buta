@@ -6,6 +6,7 @@ import uuid
 from typing import Optional, Tuple
 
 from pyrogram import Client, filters, types
+from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait, RPCError
 
 from bot_instance import bot
@@ -55,6 +56,31 @@ ANON_COMMAND_MESSAGE = (
 def command_filter(commands):
     """Build command filter with configured prefixes."""
     return filters.command(commands, prefixes=COMMAND_PREFIXES)
+
+
+def _has_handler(app: Client, callback_names: set[str]) -> bool:
+    """Check whether a handler callback is already registered."""
+    for group in app.dispatcher.groups.values():
+        for handler in group:
+            if isinstance(handler, MessageHandler):
+                callback = getattr(handler.callback, "__name__", "")
+                if callback in callback_names:
+                    return True
+    return False
+
+
+def register_handlers(app: Client) -> None:
+    """Register handlers and fallback commands."""
+    LOGGER.info("Registering handlers.")
+    if not _has_handler(app, {"start"}):
+        @app.on_message(filters.command("start") & (filters.private | GROUP_FILTER))
+        async def start_handler(client, message):
+            await message.reply("✅ Bot is alive.")
+    if not _has_handler(app, {"ping_command"}):
+        @app.on_message(filters.command("ping") & (filters.private | GROUP_FILTER))
+        async def ping_handler(client, message):
+            await message.reply("✅ Bot is alive.")
+    LOGGER.info("Handlers registered.")
 
 async def _get_session_count() -> int:
     """Return the active session count, falling back safely on errors."""
@@ -974,7 +1000,15 @@ async def add_session_command(bot, message):
             await temp.start()
             started = True
             me = await temp.get_me()
-            await add_session(session_string, me.first_name, me.phone_number or str(me.id))
+            try:
+                await add_session(session_string, me.first_name, me.phone_number or str(me.id))
+            except Exception:
+                LOGGER.exception("Failed to store session. The database may be unavailable.")
+                await _safe_reply(
+                    message,
+                    "⚠️ Session validated but failed to save. The database may be down.",
+                )
+                return
             await _safe_reply(message, f"✅ Session added for {me.first_name}.")
         finally:
             if started:
