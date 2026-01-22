@@ -207,6 +207,18 @@ def _log_command_invocation(message: types.Message, command: str) -> None:
     )
 
 
+def _log_callback_invocation(cb: types.CallbackQuery) -> None:
+    """Log callback query data for debugging."""
+    from_user_id = cb.from_user.id if cb.from_user else None
+    message_chat_id = cb.message.chat.id if cb.message else None
+    LOGGER.info(
+        "Callback invoked: data=%s from_user_id=%s chat_id=%s",
+        cb.data,
+        from_user_id,
+        message_chat_id,
+    )
+
+
 async def _require_owner(message: types.Message) -> bool:
     """Return True if the sender is an owner; otherwise send a warning."""
     if await _reject_anonymous_command(message):
@@ -394,6 +406,12 @@ async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
 async def log_commands(bot, message):
     """Log command traffic for debugging."""
     _log_command_update(message)
+
+
+@bot.on_callback_query()
+async def log_callbacks(bot, cb):
+    """Log callback query traffic for debugging."""
+    _log_callback_invocation(cb)
 
 
 @bot.on_message(command_filter(COMMANDS) & GROUP_FILTER)

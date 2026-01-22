@@ -118,10 +118,10 @@ async def main():
     await _wait_for_db_ready()
     await ensure_indexes()
     LOGGER.info("Database indexes ensured.")
-    register_handlers(bot)
-    LOGGER.info("Handlers registered.")
     await bot.start()
     LOGGER.info("Bot client started.")
+    register_handlers(bot)
+    LOGGER.info("Handlers registered.")
     me = await bot.get_me()
     LOGGER.info(
         "Startup banner: name=%s owner_ids=%s api_id=%s",
