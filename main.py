@@ -6,26 +6,27 @@ from typing import Iterable
 from pyrogram import filters
 from pyrogram.errors import FloodWait, RPCError
 
+from logger_config import configure_logging
+
+configure_logging()
+
 from bot_instance import get_bot
 from config import Config
 from core import ban_queue, pre_ban_worker, start_preban_workers
 from db import check_db_health, ensure_indexes, get_active_sessions, get_settings
 from queue_handler import start_queue_monitor
-from session_loader import save_session
+from session_loader import save_session, test_all_sessions
 
 import handlers  # noqa: F401
 import payment_handler  # noqa: F401
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 LOGGER = logging.getLogger(__name__)
 bot = get_bot()
 HEALTH_LOG_INTERVAL = 60
 
 
 async def _safe_reply(message, text: str) -> None:
+    """Reply to a message, falling back to send_message on failure."""
     try:
         await message.reply(text)
     except Exception:
@@ -62,11 +63,11 @@ async def auto_session_val(client, message):
 
 
 async def _wait_for_db_ready() -> None:
+    """Wait for DB connectivity before continuing startup."""
     attempt = 0
     while True:
         ok = await check_db_health()
         if ok:
-            await ensure_indexes()
             return
         attempt += 1
         delay = min(60, 2**attempt)
@@ -75,6 +76,7 @@ async def _wait_for_db_ready() -> None:
 
 
 async def _health_logger() -> None:
+    """Emit periodic health metrics to logs."""
     while True:
         try:
             db_ok = await check_db_health()
@@ -90,11 +92,13 @@ async def _health_logger() -> None:
 
 
 def _attach_task_logger(tasks: Iterable[asyncio.Task]) -> None:
+    """Attach exception logging to background tasks."""
     for task in tasks:
         task.add_done_callback(_log_task_exception)
 
 
 def _log_task_exception(task: asyncio.Task) -> None:
+    """Log exceptions from background tasks."""
     try:
         exc = task.exception()
     except asyncio.CancelledError:
@@ -106,14 +110,28 @@ def _log_task_exception(task: asyncio.Task) -> None:
         LOGGER.error("Background task failed.", exc_info=exc)
 
 async def main():
+    """Main async entrypoint for the bot."""
     Config.validate()
-    await bot.start()
+    LOGGER.info("Config validation completed.")
     await _wait_for_db_ready()
+    await ensure_indexes()
+    LOGGER.info("Database indexes ensured.")
+    await test_all_sessions()
     monitor_task = start_queue_monitor(ban_queue)
+    LOGGER.info("Queue monitor started.")
     worker_tasks = start_preban_workers(
         bot,
         num_workers=Config.PREBAN_WORKERS,
         session_concurrency=Config.SESSION_CONCURRENCY,
+    )
+    LOGGER.info("Pre-ban workers started: %s", len(worker_tasks))
+    await bot.start()
+    me = await bot.get_me()
+    LOGGER.info(
+        "Startup banner: name=%s owner_ids=%s api_id=%s",
+        getattr(me, "first_name", "Unknown"),
+        Config.OWNERS,
+        Config.API_ID,
     )
     supervisor = asyncio.create_task(
         _supervise_workers(
@@ -154,6 +172,7 @@ async def _supervise_workers(
     num_workers: int,
     session_concurrency: int,
 ) -> None:
+    """Restart workers that crash or exit unexpectedly."""
     while True:
         while len(worker_tasks) < num_workers:
             task = asyncio.create_task(

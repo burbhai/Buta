@@ -12,23 +12,102 @@ from config import Config
 LOGGER = logging.getLogger(__name__)
 
 _client: Optional[AsyncIOMotorClient] = None
-_db: Optional[AsyncIOMotorDatabase] = None
+_db: Optional[Any] = None
 
 
-def _get_client() -> AsyncIOMotorClient:
+class InMemoryCursor:
+    """Simple async cursor for in-memory collections."""
+
+    def __init__(self, rows: list[Dict[str, Any]]) -> None:
+        self._rows = rows
+
+    async def to_list(self, length: Optional[int] = None) -> list[Dict[str, Any]]:
+        return list(self._rows)
+
+
+class InMemoryCollection:
+    """Minimal in-memory collection to emulate async Motor calls."""
+
+    def __init__(self) -> None:
+        self._docs: list[Dict[str, Any]] = []
+
+    async def create_index(self, *args, **kwargs) -> None:
+        return None
+
+    async def find_one(self, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for doc in self._docs:
+            if _match_query(doc, query):
+                return dict(doc)
+        return None
+
+    def find(self, query: Dict[str, Any]) -> InMemoryCursor:
+        rows = [dict(doc) for doc in self._docs if _match_query(doc, query)]
+        return InMemoryCursor(rows)
+
+    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False) -> None:
+        for doc in self._docs:
+            if _match_query(doc, query):
+                doc.update(update.get("$set", {}))
+                return
+        if upsert:
+            payload = dict(update.get("$set", {}))
+            for key, value in query.items():
+                if isinstance(value, dict) or key == "$or":
+                    continue
+                payload.setdefault(key, value)
+            self._docs.append(payload)
+
+
+class InMemoryDB:
+    """In-memory database fallback used when MongoDB is not configured."""
+
+    def __init__(self) -> None:
+        self.users = InMemoryCollection()
+        self.sessions = InMemoryCollection()
+        self.settings = InMemoryCollection()
+        self.user_cache = InMemoryCollection()
+
+
+def _match_query(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
+    if not query:
+        return True
+    for key, value in query.items():
+        if key == "$or":
+            return any(_match_query(doc, sub) for sub in value)
+        if isinstance(value, dict):
+            if "$gt" in value:
+                if doc.get(key) is None or doc.get(key) <= value["$gt"]:
+                    return False
+                continue
+        if doc.get(key) != value:
+            return False
+    return True
+
+
+def _get_client() -> Optional[AsyncIOMotorClient]:
+    """Return a MongoDB client or None for in-memory fallback."""
     global _client
     if _client is None:
         if not Config.MONGO_URI:
-            LOGGER.error("MongoDB URI is not configured.")
-            raise RuntimeError("Missing MONGO_URI.")
-        _client = AsyncIOMotorClient(Config.MONGO_URI)
+            LOGGER.warning("MongoDB URI is not configured. Using in-memory DB.")
+            return None
+        try:
+            _client = AsyncIOMotorClient(Config.MONGO_URI)
+        except Exception:
+            LOGGER.exception("Failed to create MongoDB client. Using in-memory DB.")
+            return None
     return _client
 
 
-def _get_db() -> AsyncIOMotorDatabase:
+def _get_db() -> Any:
+    """Return database handle, falling back to in-memory DB."""
     global _db
     if _db is None:
-        _db = _get_client()[Config.DB_NAME]
+        client = _get_client()
+        if client is None:
+            _db = InMemoryDB()
+        else:
+            _db = client[Config.DB_NAME]
     return _db
 
 
@@ -54,15 +133,21 @@ async def ensure_indexes() -> None:
         await _sessions().create_index("active")
         await _user_cache().create_index("username_norm")
         await _user_cache().create_index("user_id")
-        await _users().create_index("expiry")
+        await _users().create_index("expiry", expireAfterSeconds=0)
     except Exception:
         LOGGER.exception("Failed to create MongoDB indexes.")
 
 
 async def check_db_health() -> bool:
     """Ping MongoDB to confirm connectivity at startup."""
+    if isinstance(_get_db(), InMemoryDB):
+        LOGGER.warning("Using in-memory DB fallback.")
+        return True
     try:
-        await _get_client().admin.command("ping")
+        client = _get_client()
+        if client is None:
+            return True
+        await client.admin.command("ping")
         LOGGER.info("MongoDB connectivity check: OK.")
         return True
     except Exception:
@@ -106,20 +191,29 @@ async def get_active_sudo_users() -> list[Dict[str, Any]]:
     """Return users with active sudo access."""
     now = datetime.utcnow()
     cursor = _users().find({"expiry": {"$gt": now}})
-    return await cursor.to_list(length=None)
+    rows = await cursor.to_list(length=None)
+    for row in rows:
+        expiry = row.get("expiry")
+        if expiry:
+            row["remaining_seconds"] = int((expiry - now).total_seconds())
+    return rows
 
 async def has_access(user_id: int) -> bool:
     """Check if the user has active sudo access."""
     try:
         user = await _users().find_one({"user_id": user_id})
     except Exception:
+        LOGGER.exception("Failed to check access for user_id=%s.", user_id)
         return False
     if not user:
         return False
     expiry = user.get("expiry")
     if not expiry:
         return False
-    return expiry > datetime.utcnow()
+    if expiry <= datetime.utcnow():
+        await _users().update_one({"user_id": user_id}, {"$set": {"expiry": datetime.utcnow()}}, upsert=True)
+        return False
+    return True
 
 
 def _normalize_username(username: Optional[str]) -> Optional[str]:

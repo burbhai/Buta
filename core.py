@@ -280,6 +280,7 @@ async def force_preban_raw(
 
 
 async def is_user_banned(agent: Client, chat_id: int, target_id: int) -> bool:
+    """Check if a user is banned in a chat."""
     try:
         member = await agent.get_chat_member(chat_id, target_id)
         status = getattr(member, "status", None)
@@ -300,6 +301,7 @@ async def is_user_banned(agent: Client, chat_id: int, target_id: int) -> bool:
 
 
 def format_chat_metrics(chat_metrics: Dict[int, Dict[str, Any]]) -> str:
+    """Format per-chat metrics for logging."""
     if not chat_metrics:
         return ""
     lines: List[str] = []
@@ -316,6 +318,7 @@ def format_chat_metrics(chat_metrics: Dict[int, Dict[str, Any]]) -> str:
 
 
 def _can_restrict(me_member: Any) -> bool:
+    """Return True if the bot can restrict members in a chat."""
     if getattr(me_member, "status", None) == "creator":
         return True
     priv = getattr(me_member, "privileges", None)
@@ -323,6 +326,7 @@ def _can_restrict(me_member: Any) -> bool:
 
 
 async def _safe_send(bot: Client, chat_id: int, text: str) -> None:
+    """Safely send a message to a chat."""
     try:
         await bot.send_message(chat_id, text)
     except Exception:
@@ -337,11 +341,13 @@ async def _process_one_session(
     fallback_entity_ids: Set[int],
     verify_enabled: bool,
     verify_delay: float,
-) -> Tuple[int, int, Dict[int, Dict[str, Any]]]:
+) -> Tuple[int, int, int, int, Dict[int, Dict[str, Any]]]:
     """
-    Returns: (attempts, verified_success, per_chat_metrics)
+    Returns: (attempts, bans, skipped, verified_success, per_chat_metrics)
     """
     attempts = 0
+    bans = 0
+    skipped = 0
     verified = 0
     chat_metrics: Dict[int, Dict[str, Any]] = {}
 
@@ -377,11 +383,13 @@ async def _process_one_session(
                         },
                     )
                     chat_data["skipped"] += 1
+                    skipped += 1
                 continue
 
             try:
                 me_member = await with_floodwait(lambda: agent.get_chat_member(dialog.chat.id, "me"))
             except Exception:
+                skipped += 1
                 continue
 
             chat_data = chat_metrics.setdefault(
@@ -397,6 +405,7 @@ async def _process_one_session(
 
             if not _can_restrict(me_member):
                 chat_data["skipped"] += 1
+                skipped += 1
                 continue
 
             attempts += 1
@@ -424,6 +433,7 @@ async def _process_one_session(
                     dialog.chat.type,
                 )
                 chat_data["bans"] += 1
+                bans += 1
             except PeerIdInvalid:
                 # Warm-up and retry once
                 await collect_available_members(agent, dialog.chat.id, fallback_entities, fallback_entity_ids)
@@ -445,6 +455,7 @@ async def _process_one_session(
                         dialog.chat.type,
                     )
                     chat_data["bans"] += 1
+                    bans += 1
                 except RPCError:
                     continue
             except RPCError:
@@ -462,7 +473,7 @@ async def _process_one_session(
         except Exception:
             pass
 
-    return attempts, verified, chat_metrics
+    return attempts, bans, skipped, verified, chat_metrics
 
 
 async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
@@ -494,6 +505,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
 
             conf = await get_settings()
             log_group = conf.get("log_group")
+            if not log_group:
+                LOGGER.warning("Log group not configured; proceeding without log notifications.")
             verify_enabled = conf.get("verify_enabled", True)
             verify_delay = float(conf.get("verify_delay", 1))
 
@@ -508,6 +521,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             # Metrics
             success_count = 0
             attempt_count = 0
+            ban_count = 0
+            skip_count = 0
             session_count = 0
             chat_metrics: Dict[int, Dict[str, Any]] = {}
 
@@ -543,8 +558,10 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 if isinstance(r, Exception):
                     LOGGER.exception("Pre-ban session failed.")
                     continue
-                a, v, per_chat = r
+                a, b, s, v, per_chat = r
                 attempt_count += a
+                ban_count += b
+                skip_count += s
                 success_count += v
                 for cid, data in per_chat.items():
                     agg = chat_metrics.setdefault(
@@ -575,7 +592,9 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     f"\nTarget: `{target_label}`"
                     f"\nSessions Used: {session_count}"
                     f"\nAttempts: {attempt_count}"
-                    f"\nTotal Verified Bans: {success_count}"
+                    f"\nBans Issued: {ban_count}"
+                    f"\nSkipped: {skip_count}"
+                    f"\nVerified Bans: {success_count}"
                     f"\nBy: `{requester_id}`"
                     f"{metrics_block}",
                 )
@@ -587,7 +606,9 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 f"\nTarget: `{target_label}`"
                 f"\nSessions Used: {session_count}"
                 f"\nAttempts: {attempt_count}"
-                f"\nTotal Verified Bans: {success_count}"
+                f"\nBans Issued: {ban_count}"
+                f"\nSkipped: {skip_count}"
+                f"\nVerified Bans: {success_count}"
                 f"{metrics_block}",
             )
             success = True

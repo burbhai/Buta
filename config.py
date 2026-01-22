@@ -7,6 +7,12 @@ from typing import List, Tuple
 
 LOGGER = logging.getLogger(__name__)
 
+DEFAULT_API_ID = 123456
+DEFAULT_API_HASH = "your_api_hash"
+DEFAULT_BOT_TOKEN = "123456:ABCDEF_your_bot_token"
+DEFAULT_OWNER_IDS = [123456789]
+DEFAULT_MONGO_URI = "mongodb://localhost:27017"
+
 
 def _parse_owner_ids(raw: str) -> Tuple[List[int], List[str]]:
     tokens = [x for x in re.split(r"[,\s]+", raw.strip()) if x]
@@ -21,7 +27,9 @@ def _parse_owner_ids(raw: str) -> Tuple[List[int], List[str]]:
 
 
 def _parse_int_env(name: str, default: int) -> int:
-    raw = os.getenv(name, str(default))
+    raw = os.getenv(name)
+    if raw is None:
+        return default
     try:
         return int(raw)
     except (TypeError, ValueError):
@@ -30,12 +38,14 @@ def _parse_int_env(name: str, default: int) -> int:
 
 
 class Config:
-    API_ID = int(os.getenv("API_ID", "0"))
-    API_HASH = os.getenv("API_HASH", "")
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+    API_ID = _parse_int_env("API_ID", DEFAULT_API_ID)
+    API_HASH = os.getenv("API_HASH") or DEFAULT_API_HASH
+    BOT_TOKEN = os.getenv("BOT_TOKEN") or DEFAULT_BOT_TOKEN
     _owner_raw = os.getenv("OWNER_IDS", "")
     OWNERS, _OWNER_INVALID = _parse_owner_ids(_owner_raw)
-    MONGO_URI = os.getenv("MONGO_URI", "")
+    if not OWNERS:
+        OWNERS = DEFAULT_OWNER_IDS.copy()
+    MONGO_URI = os.getenv("MONGO_URI") or DEFAULT_MONGO_URI
     DB_NAME = os.getenv("DB_NAME", "preban_db")
     PREBAN_WORKERS = _parse_int_env("PREBAN_WORKERS", 2)
     SESSION_CONCURRENCY = _parse_int_env("SESSION_CONCURRENCY", 3)
@@ -72,4 +82,14 @@ class Config:
         if errors:
             for err in errors:
                 LOGGER.error("Config validation error: %s", err)
-            raise SystemExit(1)
+            LOGGER.warning("Continuing with fallback configuration values for local/testing use.")
+            if cls.API_ID <= 0:
+                cls.API_ID = DEFAULT_API_ID
+            if not cls.API_HASH:
+                cls.API_HASH = DEFAULT_API_HASH
+            if not cls.BOT_TOKEN or not re.match(r"^\d+:[\w-]{20,}$", cls.BOT_TOKEN):
+                cls.BOT_TOKEN = DEFAULT_BOT_TOKEN
+            if not cls.OWNERS:
+                cls.OWNERS = DEFAULT_OWNER_IDS.copy()
+            if not cls.MONGO_URI or not re.match(r"^mongodb(\+srv)?://", cls.MONGO_URI):
+                cls.MONGO_URI = DEFAULT_MONGO_URI
