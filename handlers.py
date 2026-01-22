@@ -91,14 +91,15 @@ def register_handlers(app: Client) -> None:
     """Register handlers and fallback commands."""
     LOGGER.info("Registering handlers.")
     if not _has_handler(app, {"start", "start_handler"}):
-        @app.on_message(filters.command("start") & (filters.private | GROUP_FILTER))
+        @app.on_message(command_filter("start") & (filters.private | GROUP_FILTER))
         async def start_handler(client, message):
             await _safe_reply(message, "✅ Bot is alive.")
     if not _has_handler(app, {"ping_command", "ping_handler"}):
-        @app.on_message(filters.command("ping") & (filters.private | GROUP_FILTER))
+        @app.on_message(command_filter("ping") & (filters.private | GROUP_FILTER))
         async def ping_handler(client, message):
             await _safe_reply(message, "✅ Bot is alive.")
     LOGGER.info("Handlers registered.")
+
 
 def _cleanup_love_tracker(now: Optional[float] = None) -> None:
     """Remove expired love tracker states."""
@@ -445,6 +446,8 @@ async def reject_anonymous_group_commands(bot, message):
     command_filter(
         [
             "start",
+            "help",
+            "ping",
             "preban",
             "status",
             "addsession",
@@ -490,8 +493,9 @@ async def help_command(bot, message):
         _log_command_invocation(message, "help")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
+        show_keyboard = message.chat.type == "private"
         text = _build_help_text(is_owner, has_sudo)
-        markup = _help_keyboard() if is_owner else None
+        markup = _help_keyboard() if is_owner and show_keyboard else None
         await _safe_reply(message, text, reply_markup=markup)
     except Exception:
         LOGGER.exception("Help command failed.")
@@ -506,7 +510,8 @@ async def start(bot, message):
         _log_command_invocation(message, "start")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
-        if message.chat.type == "private":
+        show_keyboard = message.chat.type == "private"
+        if show_keyboard:
             intro = (
                 "👋 **Welcome!**\n\n"
                 "Use /help to see available commands, or tap the buttons below.\n"
@@ -531,13 +536,13 @@ async def start(bot, message):
         await _safe_reply(
             message,
             f"{intro}\n{title}\n\n{body}",
-            reply_markup=_start_keyboard(is_owner, has_sudo),
+            reply_markup=_start_keyboard(is_owner, has_sudo) if show_keyboard else None,
         )
     except Exception:
         LOGGER.exception("Start handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^start_help$"))
+@bot.on_callback_query(filters.regex(r"^start_help$") & filters.private)
 async def start_help(bot, cb):
     """Show help content from the /start quick action."""
     try:
@@ -553,7 +558,7 @@ async def start_help(bot, cb):
         LOGGER.exception("Start help callback failed.")
         await _safe_edit(cb, "❌ Failed to load help information.")
 
-@bot.on_callback_query(filters.regex(r"^start_ping$"))
+@bot.on_callback_query(filters.regex(r"^start_ping$") & filters.private)
 async def start_ping(bot, cb):
     """Respond to ping from inline button."""
     try:
