@@ -93,11 +93,11 @@ def register_handlers(app: Client) -> None:
     if not _has_handler(app, {"start", "start_handler"}):
         @app.on_message(filters.command("start") & (filters.private | GROUP_FILTER))
         async def start_handler(client, message):
-            await message.reply("✅ Bot is alive.")
+            await _safe_reply(message, "✅ Bot is alive.")
     if not _has_handler(app, {"ping_command", "ping_handler"}):
         @app.on_message(filters.command("ping") & (filters.private | GROUP_FILTER))
         async def ping_handler(client, message):
-            await message.reply("✅ Bot is alive.")
+            await _safe_reply(message, "✅ Bot is alive.")
     LOGGER.info("Handlers registered.")
 
 def _cleanup_love_tracker(now: Optional[float] = None) -> None:
@@ -147,10 +147,12 @@ async def _safe_reply(message: types.Message, text: str, reply_markup: Optional[
     """Safely reply to a message with fallback send_message."""
     try:
         await message.reply(text, reply_markup=reply_markup)
+        setattr(message, "_buta_replied", True)
     except Exception:
         LOGGER.exception("Failed to reply to message.")
         try:
             await bot.send_message(message.chat.id, text, reply_markup=reply_markup)
+            setattr(message, "_buta_replied", True)
         except Exception:
             LOGGER.exception("Failed to send fallback reply.")
 
@@ -1260,4 +1262,26 @@ async def unknown_command(bot, message):
         )
     except Exception:
         LOGGER.exception("Unknown command handler failed.")
+        await _safe_reply(message, "❌ Failed to process command.")
+
+
+@bot.on_message(filters.text & (filters.private | GROUP_FILTER), group=200)
+async def fallback_command_response(bot, message):
+    """Ensure commands always receive a response if other handlers fail."""
+    try:
+        if not message.text or getattr(message, "_buta_replied", False):
+            return
+        command = _extract_command(message.text)
+        if not command or command not in COMMANDS:
+            return
+        if await _reject_anonymous_command(message):
+            return
+        _log_command_invocation(message, f"fallback:{command}")
+        await _safe_reply(
+            message,
+            "✅ Command received, but I couldn't process it right now.\n"
+            "Please try again or use /help for available commands.",
+        )
+    except Exception:
+        LOGGER.exception("Fallback command handler failed.")
         await _safe_reply(message, "❌ Failed to process command.")
