@@ -3,7 +3,6 @@ import logging
 import signal
 from typing import Iterable
 
-
 from pyrogram import filters, idle
 from pyrogram.errors import FloodWait, RPCError
 
