@@ -56,6 +56,21 @@ ANON_COMMAND_MESSAGE = (
 )
 
 
+def _extract_command(text: str | None) -> Optional[str]:
+    """Extract a command name from text using configured prefixes."""
+    if not text:
+        return None
+    stripped = text.strip()
+    for prefix in COMMAND_PREFIXES:
+        if stripped.startswith(prefix):
+            payload = stripped[len(prefix):]
+            if not payload:
+                return None
+            command = payload.split(maxsplit=1)[0]
+            return command.split("@")[0].lower()
+    return None
+
+
 def command_filter(commands):
     """Build command filter with configured prefixes."""
     return filters.command(commands, prefixes=COMMAND_PREFIXES)
@@ -1224,3 +1239,25 @@ async def set_command(bot, message):
     except Exception:
         LOGGER.exception("Set command failed.")
         await _safe_reply(message, "❌ Failed to update settings.")
+
+
+@bot.on_message(filters.text & (filters.private | GROUP_FILTER), group=100)
+async def unknown_command(bot, message):
+    """Reply to unknown commands with guidance."""
+    try:
+        if not message.text:
+            return
+        command = _extract_command(message.text)
+        if not command or command in COMMANDS:
+            return
+        if await _reject_anonymous_command(message):
+            return
+        _log_command_invocation(message, f"unknown:{command}")
+        await _safe_reply(
+            message,
+            "❓ Unknown command.\n"
+            "Use /help to see available commands.",
+        )
+    except Exception:
+        LOGGER.exception("Unknown command handler failed.")
+        await _safe_reply(message, "❌ Failed to process command.")
