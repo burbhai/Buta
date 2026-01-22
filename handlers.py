@@ -48,13 +48,22 @@ GROUP_FILTER = filters.group
 if hasattr(filters, "supergroup"):
     GROUP_FILTER |= filters.supergroup
 ANON_COMMAND_MESSAGE = (
-    "⚠️ Anonymous admin commands are not supported. Disable anonymous admin or DM the bot."
+    "⚠️ This command cannot be used anonymously. Please switch to your user account."
 )
 
 
 def command_filter(commands):
     """Build command filter with configured prefixes."""
     return filters.command(commands, prefixes=COMMAND_PREFIXES)
+
+async def _get_session_count() -> int:
+    """Return the active session count, falling back safely on errors."""
+    try:
+        sessions = await get_active_sessions()
+    except Exception:
+        LOGGER.exception("Failed to fetch active sessions.")
+        return 0
+    return len(sessions)
 
 
 async def _safe_reply(message: types.Message, text: str, reply_markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
@@ -167,8 +176,16 @@ async def _resolve_user_id(client, raw: str) -> Tuple[Optional[int], Optional[st
         return None, raw
 
 def _start_keyboard(is_owner: bool, has_sudo: bool) -> types.InlineKeyboardMarkup:
+    """Build the /start keyboard with quick actions and role-specific tools."""
+    rows = [
+        [
+            types.InlineKeyboardButton("❤️ Love", callback_data="love_send"),
+            types.InlineKeyboardButton("🆘 Help", callback_data="start_help"),
+            types.InlineKeyboardButton("🔁 Ping", callback_data="start_ping"),
+        ]
+    ]
     if is_owner:
-        return types.InlineKeyboardMarkup(
+        rows.extend(
             [
                 [
                     types.InlineKeyboardButton("👑 Owner Panel", callback_data="owner_panel"),
@@ -183,19 +200,12 @@ def _start_keyboard(is_owner: bool, has_sudo: bool) -> types.InlineKeyboardMarku
                 ],
             ]
         )
-    if has_sudo:
-        return types.InlineKeyboardMarkup(
-            [
-                [types.InlineKeyboardButton("💌 Send Love", callback_data="love_send")],
-            ]
-        )
-    return types.InlineKeyboardMarkup(
-        [
-            [types.InlineKeyboardButton("💳 Payment Options", callback_data="payment_info")],
-        ]
-    )
+    elif not has_sudo:
+        rows.append([types.InlineKeyboardButton("💳 Payment Options", callback_data="payment_info")])
+    return types.InlineKeyboardMarkup(rows)
 
 def _sudo_panel_keyboard() -> types.InlineKeyboardMarkup:
+    """Return the sudo panel keyboard."""
     return types.InlineKeyboardMarkup(
         [
             [types.InlineKeyboardButton("💌 Send Love", callback_data="love_send")],
@@ -204,6 +214,7 @@ def _sudo_panel_keyboard() -> types.InlineKeyboardMarkup:
     )
 
 def _owner_panel_keyboard() -> types.InlineKeyboardMarkup:
+    """Return the owner panel keyboard."""
     return types.InlineKeyboardMarkup(
         [
             [
@@ -223,6 +234,7 @@ def _owner_panel_keyboard() -> types.InlineKeyboardMarkup:
     )
 
 def _payment_keyboard() -> types.InlineKeyboardMarkup:
+    """Return payment helper keyboard."""
     return types.InlineKeyboardMarkup(
         [
             [types.InlineKeyboardButton("📤 Send Payment Screenshot", callback_data="payment_how")],
@@ -231,6 +243,7 @@ def _payment_keyboard() -> types.InlineKeyboardMarkup:
     )
 
 def _owner_action_keyboard(action: str) -> types.InlineKeyboardMarkup:
+    """Return owner action keyboard for a given action."""
     return types.InlineKeyboardMarkup(
         [
             [types.InlineKeyboardButton("🆔 Provide User ID/Username", callback_data=f"{action}_prompt")],
@@ -257,6 +270,56 @@ def _dm_only_message() -> str:
     """Return a DM-only warning string."""
     return "⚠️ This feature is available in private chat. Please DM the bot."
 
+def _build_help_text(is_owner: bool, has_sudo: bool) -> str:
+    """Build help text for /help and inline help callbacks."""
+    text = (
+        "🆘 **Help Menu**\n\n"
+        "Common commands:\n"
+        "• /ping - Check if bot is alive\n"
+        "• /preban <user_id or @username> - Queue a pre-ban\n"
+        "• /status - Queue status\n\n"
+    )
+    if is_owner:
+        text += (
+            "Owner commands:\n"
+            "• /addsession <session_string>\n"
+            "• /addsudo <user_id or @username>\n"
+            "• /remsudo <user_id or @username>\n"
+            "• /verify <on|off>\n"
+            "• /verify_delay <seconds>\n"
+            "• /manage - List sessions\n"
+            "• /set <key> <value> - Configure defaults\n"
+        )
+    elif has_sudo:
+        text += "You have sudo access. Use **Send Love** to submit targets."
+    else:
+        text += "You do not have sudo access yet. Submit payment proof to gain access."
+    return text
+
+async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
+    """Ensure exactly one session exists before starting pre-ban via button."""
+    if not cb.from_user:
+        return False
+    is_owner = cb.from_user.id in Config.OWNERS
+    has_sudo = is_owner or await has_access(cb.from_user.id)
+    session_count = await _get_session_count()
+    if session_count == 0:
+        await _answer_cb(cb, "No sessions available.", show_alert=True)
+        await _safe_edit(
+            cb,
+            "❌ No session available for banning. Ask the admin to add one via /set_session in the session group.",
+            reply_markup=_start_keyboard(is_owner, has_sudo),
+        )
+        return False
+    if session_count > 1:
+        await _answer_cb(cb, "Multiple sessions found.", show_alert=True)
+        await _safe_edit(
+            cb,
+            "⚠️ Multiple sessions found. Please assign a single active session using /set_session.",
+            reply_markup=_start_keyboard(is_owner, has_sudo),
+        )
+        return False
+    return True
 
 @bot.on_message(command_filter(COMMANDS))
 async def log_commands(bot, message):
@@ -309,7 +372,8 @@ async def ping_command(bot, message):
         if await _reject_anonymous_command(message):
             return
         _log_command_invocation(message, "ping")
-        await _safe_reply(message, "🏓 Pong!")
+        session_count = await _get_session_count()
+        await _safe_reply(message, f"✅ Bot is active. Sessions loaded: {session_count}")
     except Exception:
         LOGGER.exception("Ping command failed.")
         await _safe_reply(message, "❌ Failed to respond to ping.")
@@ -324,28 +388,7 @@ async def help_command(bot, message):
         _log_command_invocation(message, "help")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
-        text = (
-            "🆘 **Help Menu**\n\n"
-            "Common commands:\n"
-            "• /ping - Check if bot is alive\n"
-            "• /preban <user_id or @username> - Queue a pre-ban\n"
-            "• /status - Queue status\n\n"
-        )
-        if is_owner:
-            text += (
-                "Owner commands:\n"
-                "• /addsession <session_string>\n"
-                "• /addsudo <user_id or @username>\n"
-                "• /remsudo <user_id or @username>\n"
-                "• /verify <on|off>\n"
-                "• /verify_delay <seconds>\n"
-                "• /manage - List sessions\n"
-                "• /set <key> <value> - Configure defaults\n"
-            )
-        elif has_sudo:
-            text += "You have sudo access. Use **Send Love** to submit targets."
-        else:
-            text += "You do not have sudo access yet. Submit payment proof to gain access."
+        text = _build_help_text(is_owner, has_sudo)
         markup = _help_keyboard() if is_owner else None
         await _safe_reply(message, text, reply_markup=markup)
     except Exception:
@@ -391,6 +434,41 @@ async def start(bot, message):
     except Exception:
         LOGGER.exception("Start handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
+
+@bot.on_callback_query(filters.regex(r"^start_help$"))
+async def start_help(bot, cb):
+    """Show help content from the /start quick action."""
+    try:
+        if not cb.from_user:
+            return
+        await _answer_cb(cb)
+        is_owner = cb.from_user.id in Config.OWNERS
+        has_sudo = is_owner or await has_access(cb.from_user.id)
+        text = _build_help_text(is_owner, has_sudo)
+        markup = _help_keyboard() if is_owner else _start_keyboard(is_owner, has_sudo)
+        await _safe_edit(cb, text, reply_markup=markup)
+    except Exception:
+        LOGGER.exception("Start help callback failed.")
+        await _safe_edit(cb, "❌ Failed to load help information.")
+
+@bot.on_callback_query(filters.regex(r"^start_ping$"))
+async def start_ping(bot, cb):
+    """Respond to ping from inline button."""
+    try:
+        if not cb.from_user:
+            return
+        await _answer_cb(cb)
+        session_count = await _get_session_count()
+        is_owner = cb.from_user.id in Config.OWNERS
+        has_sudo = is_owner or await has_access(cb.from_user.id)
+        await _safe_edit(
+            cb,
+            f"✅ Bot is active. Sessions loaded: {session_count}",
+            reply_markup=_start_keyboard(is_owner, has_sudo),
+        )
+    except Exception:
+        LOGGER.exception("Start ping callback failed.")
+        await _safe_edit(cb, "❌ Failed to respond to ping.")
 
 @bot.on_callback_query(filters.regex(r"^home$") & filters.private)
 async def go_home(bot, cb):
@@ -470,6 +548,8 @@ async def love_send(bot, cb):
                 "Please complete payment to activate **Send Love** access.",
                 reply_markup=_payment_keyboard(),
             )
+            return
+        if not await _validate_single_session_for_preban(cb):
             return
         await _answer_cb(cb)
         LOVE_TRACKER[cb.from_user.id] = "awaiting_target"
@@ -638,12 +718,12 @@ async def owner_set_session_cb(bot, cb):
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
-        await update_setting("session_group", cb.message.chat.id)
         await _safe_edit(
             cb,
-            "✅ This chat is now the **Session Validation Group**.",
+            "⚠️ Use /set_session inside the session manager group to configure session intake.",
             reply_markup=_owner_panel_keyboard(),
         )
+        return
     except Exception:
         LOGGER.exception("Owner set session handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
@@ -705,6 +785,9 @@ async def set_session_group(bot, message):
         if not await _require_owner(message):
             return
         _log_command_invocation(message, "set_session")
+        if message.chat.type not in {"group", "supergroup"}:
+            await _safe_reply(message, "⚠️ Use /set_session inside the session manager group.")
+            return
         await update_setting("session_group", message.chat.id)
         await _safe_reply(message, "✅ This group is now the **Session Validation Group**.")
     except Exception:
@@ -861,17 +944,15 @@ async def health_command(bot, message):
             return
         _log_command_invocation(message, "health")
         db_ok = await check_db_health()
-        sessions = await get_active_sessions()
+        session_count = await _get_session_count()
         queue_snapshot = await get_queue_snapshot()
         worker_status = get_worker_status()
         text = (
-            "🩺 **Health Check**\n\n"
-            f"DB: {'OK' if db_ok else 'FAIL'}\n"
-            f"Active Sessions: {len(sessions)}\n"
-            f"Workers: {worker_status['alive']}/{worker_status['total']}\n"
-            f"Queue Length: {queue_snapshot['queue_length']}\n"
-            f"Active Tasks: {queue_snapshot['active_tasks']}\n"
-            f"Total Completed: {queue_snapshot['success_count']}"
+            "✅ Database: "
+            f"{'OK' if db_ok else 'FAIL'}\n"
+            f"📦 Sessions: {session_count}\n"
+            f"🔁 Workers Active: {worker_status['alive']}\n"
+            f"📈 Queue: {queue_snapshot['queue_length']}"
         )
         await _safe_reply(message, text)
     except Exception:

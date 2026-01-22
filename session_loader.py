@@ -39,6 +39,7 @@ async def save_session(session_string: str) -> bool:
         ) as app:
             me = await app.get_me()
         await add_session(session_string, me.first_name, me.phone_number or str(me.id))
+        LOGGER.info("Session added for %s.", me.first_name)
         return True
     except RPCError:
         identifier = None
@@ -57,7 +58,7 @@ async def test_all_sessions() -> None:
 
     sessions = await get_active_sessions()
     if not sessions:
-        LOGGER.info("No active sessions found for validation.")
+        LOGGER.warning("⚠️ No sessions loaded yet.")
         return
     for row in sessions:
         session_string = row.get("string")

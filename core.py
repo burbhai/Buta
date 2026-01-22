@@ -512,6 +512,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
 
             all_sessions = await get_active_sessions()
             if not all_sessions:
+                LOGGER.warning("[Worker] Idle - waiting for valid sessions.")
                 msg = "❌ No active sessions configured. Ask an owner to add sessions."
                 await _safe_send(bot, requester_id, msg)
                 if log_group:
