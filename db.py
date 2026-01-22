@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import IndexOptionsConflict
 
 from config import Config
 
@@ -13,6 +14,14 @@ LOGGER = logging.getLogger(__name__)
 
 _client: Optional[AsyncIOMotorClient] = None
 _db: Optional[Any] = None
+
+
+def _use_in_memory_db(reason: str) -> None:
+    """Switch to in-memory DB fallback and warn."""
+    global _client, _db
+    _client = None
+    _db = InMemoryDB()
+    LOGGER.warning("Using in-memory DB fallback: %s", reason)
 
 
 class InMemoryCursor:
@@ -134,6 +143,8 @@ async def ensure_indexes() -> None:
         await _user_cache().create_index("username_norm")
         await _user_cache().create_index("user_id")
         await _users().create_index("expiry", expireAfterSeconds=0)
+    except IndexOptionsConflict:
+        LOGGER.warning("MongoDB index options conflict; continuing without changes.")
     except Exception:
         LOGGER.exception("Failed to create MongoDB indexes.")
 
@@ -152,7 +163,8 @@ async def check_db_health() -> bool:
         return True
     except Exception:
         LOGGER.exception("MongoDB connectivity check failed.")
-        return False
+        _use_in_memory_db("MongoDB ping failed.")
+        return True
 
 async def get_settings() -> Dict[str, Any]:
     """Return bot settings document."""
