@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from pymongo.errors import IndexOptionsConflict
+import pymongo.errors as pymongo_errors
 
 from config import Config
 
@@ -14,6 +14,11 @@ LOGGER = logging.getLogger(__name__)
 
 _client: Optional[AsyncIOMotorClient] = None
 _db: Optional[Any] = None
+IndexOptionsConflict = getattr(
+    pymongo_errors,
+    "IndexOptionsConflict",
+    pymongo_errors.OperationFailure,
+)
 
 
 def _use_in_memory_db(reason: str) -> None:
