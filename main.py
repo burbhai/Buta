@@ -32,7 +32,7 @@ async def _safe_reply(message, text: str) -> None:
     except Exception:
         LOGGER.exception("Failed to reply to message.")
         try:
-            await message._client.send_message(message.chat.id, text)
+            await bot.send_message(message.chat.id, text)
         except Exception:
             LOGGER.exception("Failed to send fallback reply to chat.")
 
