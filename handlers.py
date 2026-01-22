@@ -297,7 +297,7 @@ def _build_help_text(is_owner: bool, has_sudo: bool) -> str:
     return text
 
 async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
-    """Ensure exactly one session exists before starting pre-ban via button."""
+    """Ensure at least one session exists before starting pre-ban via button."""
     if not cb.from_user:
         return False
     is_owner = cb.from_user.id in Config.OWNERS
@@ -308,14 +308,6 @@ async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
         await _safe_edit(
             cb,
             "❌ No session available for banning. Ask the admin to add one via /set_session in the session group.",
-            reply_markup=_start_keyboard(is_owner, has_sudo),
-        )
-        return False
-    if session_count > 1:
-        await _answer_cb(cb, "Multiple sessions found.", show_alert=True)
-        await _safe_edit(
-            cb,
-            "⚠️ Multiple sessions found. Please assign a single active session using /set_session.",
             reply_markup=_start_keyboard(is_owner, has_sudo),
         )
         return False
