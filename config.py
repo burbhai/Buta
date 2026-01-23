@@ -75,8 +75,8 @@ class Config:
             errors.append("MONGO_URI must be a valid MongoDB connection string.")
         if cls.PREBAN_WORKERS < 1:
             errors.append("PREBAN_WORKERS must be >= 1.")
-        if cls.SESSION_CONCURRENCY < 1:
-            errors.append("SESSION_CONCURRENCY must be >= 1.")
+        if cls.SESSION_CONCURRENCY < 0:
+            errors.append("SESSION_CONCURRENCY must be >= 0.")
         if cls.QUEUE_MAXSIZE < 0:
             errors.append("QUEUE_MAXSIZE must be >= 0.")
 

@@ -948,7 +948,10 @@ async def preban_all_sessions(
     fallback_entities: List[Dict[str, Any]] = []
     fallback_entity_ids: Set[int] = set()
 
-    sem = asyncio.Semaphore(max(1, int(session_concurrency)))
+    concurrency_limit = int(session_concurrency)
+    if concurrency_limit <= 0:
+        concurrency_limit = max(1, len(sessions))
+    sem = asyncio.Semaphore(concurrency_limit)
 
     async def run_one(srow: Dict[str, Any]):
         nonlocal session_count
