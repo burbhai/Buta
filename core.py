@@ -596,19 +596,7 @@ async def _process_one_session(
             if dialog.chat.type in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}:
                 dialogs.append(dialog)
             elif dialog.chat.type == enums.ChatType.CHANNEL:
-                chat_data = chat_metrics.setdefault(
-                    dialog.chat.id,
-                    {
-                        "title": getattr(dialog.chat, "title", None),
-                        "attempts": 0,
-                        "bans": 0,
-                        "skipped": 0,
-                        "verified": 0,
-                        "removed": 0,
-                    },
-                )
-                chat_data["skipped"] += 1
-                skipped += 1
+                continue
 
         target_peer = None
         if target_identity and target_identity[0] and target_identity[1]:
@@ -873,16 +861,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 bot,
                 requester_id,
                 "✅ Successful love request"
-                f"\nSuccessful Love Attempts: {success_count}"
-                f"\nGroups Attempted: {len(attempted_groups)}"
-                f"\nTarget: `{target_display}`"
-                f"\nSessions Used: {session_count}"
-                f"\nAttempts: {attempt_count}"
                 f"\nSuccess: {success_count}"
-                f"\nFailed: {failed_count}"
-                f"\nSkipped: {skip_count}"
-                f"\nVerified Bans: {verified_count}"
-                f"{metrics_block}",
+                f"\nFailed: {failed_count}",
             )
             if notify_chat_id and notify_message_id:
                 await _safe_edit_message(
@@ -890,16 +870,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     notify_chat_id,
                     int(notify_message_id),
                     "✅ **Successful love request**"
-                    f"\nSuccessful Love Attempts: {success_count}"
-                    f"\nGroups Attempted: {len(attempted_groups)}"
-                    f"\nTarget: `{target_display}`"
-                    f"\nSessions Used: {session_count}"
-                    f"\nAttempts: {attempt_count}"
                     f"\nSuccess: {success_count}"
-                    f"\nFailed: {failed_count}"
-                    f"\nSkipped: {skip_count}"
-                    f"\nVerified Bans: {verified_count}"
-                    f"{metrics_block}",
+                    f"\nFailed: {failed_count}",
                 )
             success = True
         except asyncio.CancelledError:
