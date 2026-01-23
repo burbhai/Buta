@@ -494,7 +494,7 @@ async def preban_in_group(
     async def _attempt_ban(user_id: int, access_hash: Optional[int]) -> bool:
         if user_id is None:
             return False
-        if dialog.chat.type == "group":
+        if dialog.chat.type in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}:
             await with_floodwait(lambda: agent.kick_chat_member(chat_id, user_id=user_id), max_retries=5)
             return True
         if access_hash is None:
@@ -584,9 +584,9 @@ async def _process_one_session(
         dialogs: List[Any] = []
 
         async for dialog in agent.get_dialogs():
-            if dialog.chat.type in ["group", "supergroup"]:
+            if dialog.chat.type in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}:
                 dialogs.append(dialog)
-            elif dialog.chat.type == "channel":
+            elif dialog.chat.type == enums.ChatType.CHANNEL:
                 chat_data = chat_metrics.setdefault(
                     dialog.chat.id,
                     {
