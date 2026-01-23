@@ -24,7 +24,7 @@ from pyrogram.errors import FloodWait, RPCError
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 
 from config import Config
-from core import ban_queue, get_worker_status
+from core import ban_queue, get_worker_status, parse_target_identifier
 from db import (
     add_session,
     check_db_health,
@@ -440,6 +440,33 @@ async def _resolve_user_id(client: Client, raw: str) -> Tuple[Optional[int], Opt
         return None, normalized.lower()
 
 
+async def _resolve_preban_target(
+    client: Client,
+    raw: str,
+) -> Tuple[Optional[int], Optional[str], Optional[int]]:
+    user_id, access_hash, username = parse_target_identifier(raw)
+    if user_id is not None and access_hash is not None:
+        return user_id, None, access_hash
+    if user_id is not None:
+        return user_id, None, None
+    if username is None:
+        return None, None, None
+    try:
+        user = await client.get_users(username)
+        resolved_username = getattr(user, "username", None) or username
+        return user.id, resolved_username, getattr(user, "access_hash", None)
+    except FloodWait as e:
+        await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
+        try:
+            user = await client.get_users(username)
+            resolved_username = getattr(user, "username", None) or username
+            return user.id, resolved_username, getattr(user, "access_hash", None)
+        except RPCError:
+            return None, username.lower(), None
+    except RPCError:
+        return None, username.lower(), None
+
+
 # -----------------------------
 # UI builders
 # -----------------------------
@@ -703,6 +730,7 @@ async def _queue_preban_target(
     requester_id: int,
     target_id: Optional[int],
     target_username: Optional[str],
+    target_access_hash: Optional[int] = None,
     reply_markup: Optional[types.InlineKeyboardMarkup] = None,
 ) -> bool:
     if Config.QUEUE_MAXSIZE > 0 and ban_queue.full():
@@ -723,6 +751,7 @@ async def _queue_preban_target(
             {
                 "id": target_id,
                 "username": target_username,
+                "access_hash": target_access_hash,
                 "request_id": request_id,
                 "notify_chat_id": message.chat.id,
                 "notify_message_id": reply.id if reply else None,
@@ -1407,7 +1436,7 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
                 _clear_love_state(message.from_user.id)
                 return
             has_sudo = True
-            target_id, target_username = await _resolve_user_id(client, message.text)
+            target_id, target_username, target_access_hash = await _resolve_preban_target(client, message.text)
             if target_id is None and target_username is None:
                 await _safe_reply(message, "❌ Failed to resolve user.")
                 return
@@ -1417,6 +1446,7 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
                 requester_id=message.from_user.id,
                 target_id=target_id,
                 target_username=target_username,
+                target_access_hash=target_access_hash,
                 reply_markup=_get_control_panel_keyboard(is_owner, has_sudo),
             )
             if queued:
@@ -1484,7 +1514,7 @@ async def _preban_user(client: Client, message: types.Message) -> None:
             await _safe_reply(message, "Usage: /preban <user_id or @username>")
             return
 
-        target_id, target_username = await _resolve_user_id(client, message.command[1])
+        target_id, target_username, target_access_hash = await _resolve_preban_target(client, message.command[1])
 
         if target_id is None and target_username is None:
             await _safe_reply(message, "❌ Failed to resolve user.")
@@ -1496,6 +1526,7 @@ async def _preban_user(client: Client, message: types.Message) -> None:
             requester_id=message.from_user.id,
             target_id=target_id,
             target_username=target_username,
+            target_access_hash=target_access_hash,
         )
     except Exception:
         LOGGER.exception("Preban command failed.")
