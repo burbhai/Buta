@@ -300,6 +300,39 @@ async def is_user_banned(agent: Client, chat_id: int, target_id: int) -> bool:
     return False
 
 
+async def is_user_removed(
+    agent: Client,
+    chat_id: int,
+    target_id: Optional[int],
+    target_username: Optional[str],
+) -> bool:
+    """Check if a user appears in the removed/banned list."""
+    if target_id is not None:
+        return await is_user_banned(agent, chat_id, target_id)
+
+    if not target_username:
+        return False
+
+    query = target_username.lstrip("@")
+    try:
+        async for member in agent.get_chat_members(
+            chat_id,
+            filter=enums.ChatMembersFilter.BANNED,
+            query=query,
+            limit=20,
+        ):
+            if not member.user:
+                continue
+            username = getattr(member.user, "username", None)
+            if username and username.lower().lstrip("@") == query.lower():
+                return True
+    except FloodWait as e:
+        await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
+    except RPCError:
+        return False
+    return False
+
+
 def format_chat_metrics(chat_metrics: Dict[int, Dict[str, Any]]) -> str:
     """Format per-chat metrics for logging."""
     if not chat_metrics:
@@ -312,7 +345,8 @@ def format_chat_metrics(chat_metrics: Dict[int, Dict[str, Any]]) -> str:
             f"attempts={data['attempts']} "
             f"bans={data['bans']} "
             f"skipped={data['skipped']} "
-            f"verified={data['verified']}"
+            f"verified={data['verified']} "
+            f"removed={data.get('removed', 0)}"
         )
     return "\n".join(lines)
 
@@ -351,14 +385,15 @@ async def _process_one_session(
     fallback_entity_ids: Set[int],
     verify_enabled: bool,
     verify_delay: float,
-) -> Tuple[int, int, int, int, Dict[int, Dict[str, Any]]]:
+) -> Tuple[int, int, int, int, int, Dict[int, Dict[str, Any]]]:
     """
-    Returns: (attempts, bans, skipped, verified_success, per_chat_metrics)
+    Returns: (attempts, bans, skipped, verified_success, removed_success, per_chat_metrics)
     """
     attempts = 0
     bans = 0
     skipped = 0
     verified = 0
+    removed = 0
     chat_metrics: Dict[int, Dict[str, Any]] = {}
 
     agent = Client(
@@ -390,6 +425,7 @@ async def _process_one_session(
                             "bans": 0,
                             "skipped": 0,
                             "verified": 0,
+                            "removed": 0,
                         },
                     )
                     chat_data["skipped"] += 1
@@ -410,6 +446,7 @@ async def _process_one_session(
                     "bans": 0,
                     "skipped": 0,
                     "verified": 0,
+                    "removed": 0,
                 },
             )
 
@@ -471,6 +508,10 @@ async def _process_one_session(
             except RPCError:
                 continue
 
+            if await is_user_removed(agent, dialog.chat.id, resolved_id, resolved_username):
+                removed += 1
+                chat_data["removed"] += 1
+
             if verify_enabled:
                 await asyncio.sleep(max(0.0, verify_delay))
                 if await is_user_banned(agent, dialog.chat.id, resolved_id):
@@ -483,7 +524,7 @@ async def _process_one_session(
         except Exception:
             pass
 
-    return attempts, bans, skipped, verified, chat_metrics
+    return attempts, bans, skipped, verified, removed, chat_metrics
 
 
 async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
@@ -539,6 +580,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
 
             # Metrics
             verified_count = 0
+            removed_count = 0
             attempt_count = 0
             ban_count = 0
             skip_count = 0
@@ -550,7 +592,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             fallback_entity_ids: Set[int] = set()
 
             # Run sessions in parallel (bounded)
-            sem = asyncio.Semaphore(max(1, int(session_concurrency)))
+            effective_concurrency = max(1, int(session_concurrency), len(all_sessions))
+            sem = asyncio.Semaphore(effective_concurrency)
 
             async def run_one(srow: Dict[str, Any]):
                 nonlocal session_count
@@ -577,11 +620,12 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 if isinstance(r, Exception):
                     LOGGER.exception("Pre-ban session failed.")
                     continue
-                a, b, s, v, per_chat = r
+                a, b, s, v, removed, per_chat = r
                 attempt_count += a
                 ban_count += b
                 skip_count += s
                 verified_count += v
+                removed_count += removed
                 for cid, data in per_chat.items():
                     agg = chat_metrics.setdefault(
                         cid,
@@ -591,19 +635,21 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                             "bans": 0,
                             "skipped": 0,
                             "verified": 0,
+                            "removed": 0,
                         },
                     )
                     agg["attempts"] += data.get("attempts", 0)
                     agg["bans"] += data.get("bans", 0)
                     agg["skipped"] += data.get("skipped", 0)
                     agg["verified"] += data.get("verified", 0)
+                    agg["removed"] += data.get("removed", 0)
 
             # Notify
             metrics_block = format_chat_metrics(chat_metrics)
             if metrics_block:
                 metrics_block = f"\n\n**Per-chat Metrics**\n{metrics_block}"
 
-            success_count = verified_count if verify_enabled else ban_count
+            success_count = removed_count
             failed_count = max(0, attempt_count - success_count)
             if log_group:
                 await _safe_send(
@@ -618,6 +664,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     f"\nFailed: {failed_count}"
                     f"\nSkipped: {skip_count}"
                     f"\nVerified Bans: {verified_count}"
+                    f"\nSuccessful Love Attempts: {success_count}"
                     f"\nBy: `{requester_id}`"
                     f"{metrics_block}",
                 )
@@ -633,6 +680,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 f"\nFailed: {failed_count}"
                 f"\nSkipped: {skip_count}"
                 f"\nVerified Bans: {verified_count}"
+                f"\nSuccessful Love Attempts: {success_count}"
                 f"{metrics_block}",
             )
             if notify_chat_id and notify_message_id:
@@ -648,6 +696,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     f"\nFailed: {failed_count}"
                     f"\nSkipped: {skip_count}"
                     f"\nVerified Bans: {verified_count}"
+                    f"\nSuccessful Love Attempts: {success_count}"
                     f"{metrics_block}",
                 )
             success = True
