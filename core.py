@@ -4,7 +4,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, List, Set, Callable, Awaitable
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 
 from pyrogram import Client, enums
 from pyrogram.errors import (
@@ -18,7 +18,6 @@ from pyrogram.errors import (
     UsernameInvalid,
     UsernameNotOccupied,
 )
-
 from pyrogram.raw import functions, types
 
 from db import get_active_sessions, get_settings
@@ -32,6 +31,8 @@ _QUEUE_MAXSIZE = max(0, int(getattr(Config, "QUEUE_MAXSIZE", 0)))
 ban_queue: "asyncio.Queue[Tuple[Any, int]]" = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
 WORKER_TASKS: List[asyncio.Task] = []
 
+T = TypeVar("T")
+
 
 def _normalize_chat_id(value: Any) -> Optional[int]:
     if value is None:
@@ -40,6 +41,15 @@ def _normalize_chat_id(value: Any) -> Optional[int]:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _load_db_hook(name: str) -> Optional[Callable[..., Awaitable[Any]]]:
+    try:
+        import db  # type: ignore
+    except Exception:
+        return None
+    fn = getattr(db, name, None)
+    return fn if callable(fn) else None
 
 
 # -----------------------------
@@ -56,11 +66,11 @@ class CachedUser:
 
 class UserCache:
     """
-    Access-hash cache. For true persistence, implement in db.py:
+    Access-hash cache.
+
+    Optional db.py hooks:
       - async def get_user_cache(*, user_id: int|None, username: str|None) -> dict|None
       - async def upsert_user_cache(user: dict) -> None
-
-    Fallback: in-memory cache per process.
     """
 
     def __init__(self, max_size: int = 50_000) -> None:
@@ -68,15 +78,13 @@ class UserCache:
         self._by_username: Dict[str, int] = {}
         self._lock = asyncio.Lock()
         self._max_size = max_size
+        self._db_get = _load_db_hook("get_user_cache")
+        self._db_upsert = _load_db_hook("upsert_user_cache")
 
     async def get(self, *, user_id: Optional[int], username: Optional[str]) -> Optional[CachedUser]:
-        db_get = globals().get("get_user_cache")
-        if db_get is None:
-            db_get = getattr(__import__("db"), "get_user_cache", None)
-
-        if callable(db_get):
+        if callable(self._db_get):
             try:
-                row = await db_get(user_id=user_id, username=username)
+                row = await self._db_get(user_id=user_id, username=username)
                 if row and row.get("user_id") and row.get("access_hash"):
                     return CachedUser(
                         user_id=int(row["user_id"]),
@@ -106,13 +114,9 @@ class UserCache:
             "updated_at": now,
         }
 
-        db_upsert = globals().get("upsert_user_cache")
-        if db_upsert is None:
-            db_upsert = getattr(__import__("db"), "upsert_user_cache", None)
-
-        if callable(db_upsert):
+        if callable(self._db_upsert):
             try:
-                await db_upsert(payload)
+                await self._db_upsert(payload)
             except Exception:
                 pass
 
@@ -173,6 +177,34 @@ class PrebanError(Exception):
     pass
 
 
+class FloodWaitRetriesExceeded(PrebanError):
+    pass
+
+
+async def with_floodwait(
+    coro_factory: Callable[[], Awaitable[T]],
+    *,
+    max_retries: int = 3,
+) -> T:
+    last_rpc: Optional[Exception] = None
+    last_fw: Optional[Exception] = None
+
+    for _ in range(max_retries):
+        try:
+            return await coro_factory()
+        except FloodWait as e:
+            last_fw = e
+            await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
+            continue
+        except RPCError as e:
+            last_rpc = e
+            break
+
+    if last_rpc:
+        raise last_rpc
+    raise FloodWaitRetriesExceeded(f"FloodWait retries exceeded ({max_retries}).") from last_fw
+
+
 async def resolve_public_username(app: Client, username: str) -> int:
     try:
         normalized = normalize_username(username)
@@ -199,28 +231,11 @@ async def preban_ban_now(app: Client, chat_id: int, username: str) -> Dict[str, 
         normalized = normalize_username(username)
         user_id = await resolve_public_username(app, normalized)
         await app.ban_chat_member(chat_id, user_id)
-        return {
-            "ok": True,
-            "chat_id": int(chat_id),
-            "username": normalized,
-            "user_id": int(user_id),
-        }
+        return {"ok": True, "chat_id": int(chat_id), "username": normalized, "user_id": int(user_id)}
     except PrebanError as exc:
-        return {
-            "ok": False,
-            "chat_id": int(chat_id),
-            "username": normalized or "",
-            "user_id": 0,
-            "error": str(exc),
-        }
+        return {"ok": False, "chat_id": int(chat_id), "username": normalized or "", "user_id": 0, "error": str(exc)}
     except (FloodWait, RPCError, ValueError) as exc:
-        return {
-            "ok": False,
-            "chat_id": int(chat_id),
-            "username": normalized or "",
-            "user_id": 0,
-            "error": str(exc),
-        }
+        return {"ok": False, "chat_id": int(chat_id), "username": normalized or "", "user_id": 0, "error": str(exc)}
 
 
 def parse_target_identifier(raw: str) -> Tuple[Optional[int], Optional[int], Optional[str]]:
@@ -252,24 +267,6 @@ def add_fallback_entity(
     fallback_entity_ids.add(user_id)
 
 
-async def with_floodwait(
-    coro_factory: Callable[[], Awaitable[Any]],
-    *,
-    max_retries: int = 3,
-) -> Any:
-    last_exc: Optional[Exception] = None
-    for _ in range(max_retries):
-        try:
-            return await coro_factory()
-        except FloodWait as e:
-            await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
-        except RPCError as e:
-            last_exc = e
-            break
-    if last_exc:
-        raise last_exc
-
-
 def can_attempt_preban(
     chat_type: Any,
     user_id: Optional[int],
@@ -278,8 +275,6 @@ def can_attempt_preban(
     if user_id is None:
         return False, "missing user_id"
     if _needs_access_hash_for_raw(chat_type) and access_hash is None:
-        # We can still try ban_chat_member (works only if peer is known in this session),
-        # but raw preban won't be possible without access_hash.
         return True, None
     return True, None
 
@@ -299,18 +294,13 @@ async def collect_available_members(
     chat_id: int,
     fallback_entities: List[Dict[str, Any]],
     fallback_entity_ids: Set[int],
-    limit: int = 10,
+    limit: int = 30,
 ) -> None:
     try:
         async for member in agent.get_chat_members(chat_id, limit=limit):
             if not member.user:
                 continue
-            add_fallback_entity(
-                fallback_entities,
-                fallback_entity_ids,
-                member.user.id,
-                member.user.username,
-            )
+            add_fallback_entity(fallback_entities, fallback_entity_ids, member.user.id, member.user.username)
     except RPCError:
         return
 
@@ -320,14 +310,9 @@ async def _try_resolve_peer_user(
     target_id: Optional[int],
     target_username: Optional[str],
 ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-    """
-    Try to extract (user_id, access_hash, username) from local peer storage / resolve_peer().
-    This often succeeds even when get_users(target_id) raises PeerIdInvalid.
-    """
     try:
-        key: Any = None
         if target_username:
-            key = target_username if target_username.startswith("@") else f"@{target_username}"
+            key: Any = target_username if target_username.startswith("@") else f"@{target_username}"
         elif target_id is not None:
             key = target_id
         else:
@@ -350,21 +335,15 @@ async def ensure_entity_with_access_hash(
     target_id: Optional[int],
     target_username: Optional[str],
 ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-    """
-    Returns (user_id, access_hash, username).
-    access_hash is REQUIRED for raw pre-ban when user isn't in the group.
-    """
     cached = await USER_CACHE.get(user_id=target_id, username=target_username)
     if cached:
         return cached.user_id, cached.access_hash, cached.username or target_username
 
-    # 0) Try resolve_peer (session peer database)
     uid, ah, uname = await _try_resolve_peer_user(agent, target_id, target_username)
     if uid is not None and ah is not None:
         await USER_CACHE.upsert(user_id=uid, access_hash=ah, username=uname or target_username)
         return uid, ah, uname or target_username
 
-    # 1) Username -> get_users (network)
     if target_username:
         try:
             u = await with_floodwait(lambda: agent.get_users(target_username))
@@ -374,7 +353,6 @@ async def ensure_entity_with_access_hash(
         except RPCError:
             LOGGER.exception("Failed to resolve username=%s for access_hash.", target_username)
 
-    # 2) ID -> get_users (network; may fail if peer unknown)
     if target_id is None:
         return None, None, target_username
 
@@ -384,7 +362,6 @@ async def ensure_entity_with_access_hash(
             await USER_CACHE.upsert(user_id=u.id, access_hash=u.access_hash, username=u.username)
             return u.id, u.access_hash, u.username or target_username
     except PeerIdInvalid:
-        # Try resolve_peer one more time (some sessions populate peers after other calls)
         uid, ah, uname = await _try_resolve_peer_user(agent, target_id, target_username)
         if uid is not None and ah is not None:
             await USER_CACHE.upsert(user_id=uid, access_hash=ah, username=uname or target_username)
@@ -440,9 +417,7 @@ async def resolve_target_globally(
         try:
             await agent.start()
             resolved_id, access_hash, resolved_username = await ensure_entity_with_access_hash(
-                agent,
-                target_id,
-                normalized_username,
+                agent, target_id, normalized_username
             )
             if resolved_id is not None and access_hash is not None:
                 await USER_CACHE.upsert(
@@ -469,9 +444,6 @@ async def force_preban_raw(
     access_hash: int,
     chat_type: Any,
 ) -> None:
-    """
-    Strong pre-ban (user can be not in group) using raw API.
-    """
     if _is_basic_group(chat_type):
         await with_floodwait(lambda: agent.ban_chat_member(chat_id, user_id=user_id), max_retries=5)
         return
@@ -486,6 +458,22 @@ async def force_preban_raw(
         )
 
     await with_floodwait(_invoke, max_retries=5)
+
+
+async def is_user_banned_by_scan(agent: Client, chat_id: int, target_id: int, limit: int = 200) -> bool:
+    try:
+        async for member in agent.get_chat_members(
+            chat_id,
+            filter=enums.ChatMembersFilter.BANNED,
+            limit=limit,
+        ):
+            if member.user and member.user.id == target_id:
+                return True
+    except FloodWait as e:
+        await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
+    except RPCError:
+        return False
+    return False
 
 
 async def is_user_banned(agent: Client, chat_id: int, target_id: int) -> bool:
@@ -505,7 +493,6 @@ async def is_user_banned(agent: Client, chat_id: int, target_id: int) -> bool:
         return False
     except RPCError:
         return False
-    return False
 
 
 async def is_user_removed(
@@ -523,33 +510,12 @@ async def is_user_removed(
             chat_id,
             filter=enums.ChatMembersFilter.BANNED,
             query=query,
-            limit=20,
+            limit=30,
         ):
             if not member.user:
                 continue
             username = getattr(member.user, "username", None)
             if username and username.lower().lstrip("@") == query.lower():
-                return True
-    except FloodWait as e:
-        await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
-    except RPCError:
-        return False
-    return False
-
-
-async def is_user_banned_by_scan(
-    agent: Client,
-    chat_id: int,
-    target_id: int,
-    limit: int = 200,
-) -> bool:
-    try:
-        async for member in agent.get_chat_members(
-            chat_id,
-            filter=enums.ChatMembersFilter.BANNED,
-            limit=limit,
-        ):
-            if member.user and member.user.id == target_id:
                 return True
     except FloodWait as e:
         await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
@@ -604,10 +570,24 @@ def format_chat_failures(chat_metrics: Dict[int, Dict[str, Any]]) -> str:
 
 
 def _can_restrict(me_member: Any) -> bool:
-    if getattr(me_member, "status", None) == "creator":
+    status = getattr(me_member, "status", None)
+    if status in {"creator", enums.ChatMemberStatus.OWNER}:
         return True
+
     priv = getattr(me_member, "privileges", None)
-    return bool(priv and getattr(priv, "can_restrict_members", False))
+    if priv is not None:
+        return bool(getattr(priv, "can_restrict_members", False))
+
+    # Some pyrogram builds expose rights directly on ChatMember (esp. for groups)
+    direct = getattr(me_member, "can_restrict_members", None)
+    if direct is not None:
+        return bool(direct)
+
+    # Conservative fallback: if admin but no explicit flag surfaced, try anyway.
+    if status in {"administrator", enums.ChatMemberStatus.ADMINISTRATOR}:
+        return True
+
+    return False
 
 
 async def _safe_send(bot: Client, chat_id: int, text: str) -> None:
@@ -659,10 +639,12 @@ async def preban_in_group(
             me_member = await with_floodwait(lambda: agent.get_chat_member(chat_id, "me"))
         except Exception:
             chat_data["skipped"] += 1
+            chat_data["failure_reason"] = "unable to check ban rights"
             return 0, 0, 1, 0, 0, chat_data
 
     if not _can_restrict(me_member):
         chat_data["skipped"] += 1
+        chat_data["failure_reason"] = "missing ban rights"
         return 0, 0, 1, 0, 0, chat_data
 
     chat_data["attempts"] += 1
@@ -681,33 +663,51 @@ async def preban_in_group(
         if not can_attempt:
             return BanAttemptResult(attempted=False, succeeded=False, reason=reason or "preban not possible")
 
-        try:
-            # Supergroup/Channel: prefer raw if possible (works even if not participant)
-            if _needs_access_hash_for_raw(chat_type) and access_hash is not None:
-                await force_preban_raw(agent, chat_id, user_id=int(user_id), access_hash=int(access_hash), chat_type=chat_type)
-                return BanAttemptResult(attempted=True, succeeded=True)
+        if user_id is None:
+            return BanAttemptResult(attempted=False, succeeded=False, reason="missing user_id")
 
-            # Basic group or no access_hash: try standard ban (may still work if peer known)
+        # 1) Supergroup/Channel: raw preban if possible (works even if not participant)
+        if _needs_access_hash_for_raw(chat_type) and access_hash is not None:
+            try:
+                await force_preban_raw(
+                    agent,
+                    chat_id,
+                    user_id=int(user_id),
+                    access_hash=int(access_hash),
+                    chat_type=chat_type,
+                )
+                return BanAttemptResult(attempted=True, succeeded=True)
+            except (ChatAdminRequired, UserAdminInvalid, UserIdInvalid, PeerIdInvalid, RPCError) as exc:
+                LOGGER.warning(
+                    "Raw preban failed chat_id=%s user_id=%s username=%s error=%s",
+                    chat_id,
+                    user_id,
+                    resolved_username or target_username,
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                # Fallback to normal ban (works if participant/peer known)
+                try:
+                    await with_floodwait(lambda: agent.ban_chat_member(chat_id, user_id=user_id), max_retries=5)
+                    return BanAttemptResult(attempted=True, succeeded=True, reason="raw_failed_normal_ok")
+                except Exception as exc2:
+                    return BanAttemptResult(attempted=True, succeeded=False, reason=f"{type(exc2).__name__}", exception=exc2)
+
+        # 2) Basic group OR missing access_hash: normal ban attempt
+        try:
             await with_floodwait(lambda: agent.ban_chat_member(chat_id, user_id=user_id), max_retries=5)
             return BanAttemptResult(attempted=True, succeeded=True)
-
         except (ChatAdminRequired, UserAdminInvalid, UserIdInvalid, PeerIdInvalid, RPCError) as exc:
             LOGGER.warning(
-                "Preban failed chat_id=%s user_id=%s username=%s error=%s",
+                "Normal ban failed chat_id=%s user_id=%s username=%s error=%s",
                 chat_id,
                 user_id,
                 resolved_username or target_username,
                 type(exc).__name__,
                 exc_info=True,
             )
-            # Provide clearer reason if raw was needed but missing access_hash
             if _needs_access_hash_for_raw(chat_type) and access_hash is None:
-                return BanAttemptResult(
-                    attempted=True,
-                    succeeded=False,
-                    reason="missing access_hash",
-                    exception=exc,
-                )
+                return BanAttemptResult(attempted=True, succeeded=False, reason="missing access_hash", exception=exc)
             return BanAttemptResult(attempted=True, succeeded=False, reason=f"{type(exc).__name__}", exception=exc)
 
     result = BanAttemptResult(attempted=False, succeeded=False, reason="preban not attempted")
@@ -720,7 +720,7 @@ async def preban_in_group(
             success = 1
             chat_data["bans"] += 1
 
-    # 2) Resolve per-chat/session if needed
+    # 2) Resolve per-session if needed (even if user not in members list)
     if banned == 0:
         await collect_available_members(agent, chat_id, fallback_entities, fallback_entity_ids)
 
@@ -747,7 +747,7 @@ async def preban_in_group(
             else:
                 chat_data["failure_reason"] = result.reason
 
-    # 3) Quick removed check (optional)
+    # 3) Quick removed check
     if banned and resolved_id is not None:
         try:
             if await verify_removed(agent, chat_id, resolved_username, resolved_id):
@@ -838,6 +838,7 @@ async def _process_one_session(
                         },
                     )
                     continue
+
                 if not _can_restrict(me_member):
                     skipped += 1
                     chat_metrics.setdefault(
@@ -854,10 +855,9 @@ async def _process_one_session(
                         },
                     )
                     continue
+
                 eligible_members[chat_id] = me_member
                 dialogs.append(dialog)
-            elif dialog.chat.type == enums.ChatType.CHANNEL:
-                continue
 
         target_peer = None
         if target_identity and target_identity[0] and target_identity[1]:
@@ -1019,7 +1019,7 @@ async def preban_all_sessions(
     )
 
 
-async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
+async def pre_ban_worker(bot: Client, *, session_concurrency: int = 3) -> None:
     while True:
         got_item = False
         target_label = "unknown"
@@ -1031,6 +1031,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
         try:
             target_info, requester_id = await ban_queue.get()
             got_item = True
+
             if isinstance(target_info, dict):
                 request_id = target_info.get("request_id")
                 if request_id:
@@ -1041,6 +1042,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             target_id: Optional[int] = None
             target_username: Optional[str] = None
             target_access_hash: Optional[int] = None
+
             if isinstance(target_info, dict):
                 target_id = target_info.get("id")
                 raw_username = target_info.get("username")
@@ -1054,21 +1056,18 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
 
             conf = await get_settings()
             log_group = _normalize_chat_id(conf.get("log_group"))
-            if not log_group:
-                LOGGER.warning("Log group not configured; proceeding without log notifications.")
             verify_enabled = conf.get("verify_enabled", True)
             verify_delay = float(conf.get("verify_delay", 1))
 
             all_sessions = await get_active_sessions()
             if not all_sessions:
-                LOGGER.warning("[Worker] Idle - waiting for valid sessions.")
                 msg = "❌ No active sessions configured. Ask an owner to add sessions."
                 await _safe_send(bot, requester_id, msg)
                 if log_group:
                     await _safe_send(bot, log_group, f"{msg}\nRequester: `{requester_id}`")
                 continue
 
-            target_identity = None
+            target_identity: Optional[Tuple[int, int]] = None
             if target_id is not None and target_access_hash is not None:
                 target_identity = (target_id, target_access_hash)
             else:
@@ -1108,11 +1107,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
 
             success_count = len(confirmed_groups)
             failed_count = max(0, len(attempted_groups) - success_count)
-            target_display = (
-                target_id
-                if target_id is not None
-                else (f"@{target_username}" if target_username else "unknown")
-            )
+            target_display = target_id if target_id is not None else (f"@{target_username}" if target_username else "unknown")
+
             failures_block = format_chat_failures(chat_metrics)
             if failures_block:
                 failures_block = f"\n\n**Failures**\n{failures_block}"
@@ -1131,7 +1127,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     f"\nFailed: {failed_count}"
                     f"\nSkipped: {skip_count}"
                     f"\nVerified Bans: {verified_count}"
-                    f"\nSuccessful Love Attempts: {success_count}"
+                    f"\nRemoved(quick): {removed_count}"
                     f"\nBy: `{requester_id}`"
                     f"{metrics_block}"
                     f"{failures_block}",
@@ -1154,6 +1150,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     f"\nFailed: {failed_count}",
                 )
             success = True
+
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1174,11 +1171,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             except Exception:
                 log_group = None
             if log_group:
-                await _safe_send(
-                    bot,
-                    log_group,
-                    f"{failure_message}\nTarget: `{target_label}`\nBy: `{requester_id}`",
-                )
+                await _safe_send(bot, log_group, f"{failure_message}\nTarget: `{target_label}`\nBy: `{requester_id}`")
+
         finally:
             if got_item:
                 try:
@@ -1191,7 +1185,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 await asyncio.sleep(1)
 
 
-def start_preban_workers(bot, *, num_workers: int = 2, session_concurrency: int = 3) -> List[asyncio.Task]:
+def start_preban_workers(bot: Client, *, num_workers: int = 2, session_concurrency: int = 3) -> List[asyncio.Task]:
     tasks: List[asyncio.Task] = []
     for _ in range(max(1, int(num_workers))):
         tasks.append(asyncio.create_task(pre_ban_worker(bot, session_concurrency=session_concurrency)))
