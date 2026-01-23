@@ -933,7 +933,7 @@ async def preban_all_sessions(
     verify_enabled: bool,
     verify_delay: float,
     session_concurrency: int,
-) -> Tuple[int, int, int, int, int, int, Dict[int, Dict[str, Any]], Set[int], Set[int]]:
+) -> Tuple[int, int, int, int, int, int, Dict[int, Dict[str, Any]], Set[int], Set[int], Set[int]]:
     verified_count = 0
     removed_count = 0
     attempt_count = 0
@@ -943,6 +943,7 @@ async def preban_all_sessions(
     chat_metrics: Dict[int, Dict[str, Any]] = {}
     attempted_groups: Set[int] = set()
     confirmed_groups: Set[int] = set()
+    removed_groups: Set[int] = set()
 
     fallback_entities: List[Dict[str, Any]] = []
     fallback_entity_ids: Set[int] = set()
@@ -984,6 +985,8 @@ async def preban_all_sessions(
                 attempted_groups.add(cid)
             if data.get("success", 0) > 0:
                 confirmed_groups.add(cid)
+            if data.get("removed", 0) > 0:
+                removed_groups.add(cid)
             agg = chat_metrics.setdefault(
                 cid,
                 {
@@ -1016,6 +1019,7 @@ async def preban_all_sessions(
         chat_metrics,
         attempted_groups,
         confirmed_groups,
+        removed_groups,
     )
 
 
@@ -1091,6 +1095,7 @@ async def pre_ban_worker(bot: Client, *, session_concurrency: int = 3) -> None:
                 chat_metrics,
                 attempted_groups,
                 confirmed_groups,
+                removed_groups,
             ) = await preban_all_sessions(
                 all_sessions,
                 target_identity=target_identity,
@@ -1105,7 +1110,7 @@ async def pre_ban_worker(bot: Client, *, session_concurrency: int = 3) -> None:
             if metrics_block:
                 metrics_block = f"\n\n**Per-chat Metrics**\n{metrics_block}"
 
-            success_count = len(confirmed_groups)
+            success_count = len(removed_groups)
             failed_count = max(0, len(attempted_groups) - success_count)
             target_display = target_id if target_id is not None else (f"@{target_username}" if target_username else "unknown")
 
