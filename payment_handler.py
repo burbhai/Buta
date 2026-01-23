@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 
 from pyrogram import Client, enums, filters, types
-from pyrogram.errors import RPCError
+from pyrogram.errors import ChatWriteForbidden, PeerIdInvalid, RPCError
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 
 from config import Config
@@ -21,16 +21,27 @@ LOGGER = logging.getLogger(__name__)
 CALLBACK_PREFIX = "buta:payment:"
 
 
-def _message_private_filter(_: Client, message: types.Message) -> bool:
-    return bool(getattr(message, "chat", None) and message.chat.type == enums.ChatType.PRIVATE)
+_PRIVATE_CHAT_TYPES = {enums.ChatType.PRIVATE}
+if hasattr(enums.ChatType, "BOT"):
+    _PRIVATE_CHAT_TYPES.add(enums.ChatType.BOT)
+
+
+def is_private_message(message: types.Message) -> bool:
+    return bool(getattr(message, "chat", None) and message.chat.type in _PRIVATE_CHAT_TYPES)
+
+
+def _message_private_filter(_: filters.Filter, __: Client, message: types.Message) -> bool:
+    return is_private_message(message)
 
 
 MESSAGE_PRIVATE_FILTER = filters.create(_message_private_filter)
 
 
 def _normalize_chat_id(value: object) -> int | None:
+    if value is None:
+        return None
     try:
-        return int(value)
+        return int(str(value).strip())
     except (TypeError, ValueError):
         return None
 
@@ -128,12 +139,25 @@ async def _handle_payment_screenshot(client: Client, message: types.Message) -> 
             durations = [default_duration, *durations]
         kb = _build_approval_keyboard(message.from_user.id, durations)
 
-        await message.forward(log_group)
-        admin_msg = await client.send_message(
-            log_group,
-            f"💳 **New Payment** from `{message.from_user.id}`",
-            reply_markup=kb,
-        )
+        try:
+            await message.forward(log_group)
+            admin_msg = await client.send_message(
+                log_group,
+                f"💳 **New Payment** from `{message.from_user.id}`",
+                reply_markup=kb,
+            )
+        except (PeerIdInvalid, ChatWriteForbidden) as exc:
+            LOGGER.warning("Payment log group invalid/unwritable: %s", exc)
+            await _safe_reply(
+                message,
+                "⚠️ Payment review is not configured yet. Please contact an admin.",
+            )
+            return
+        except RPCError:
+            LOGGER.exception("Failed to forward payment proof.")
+            await _safe_reply(message, "❌ Failed to submit payment proof.")
+            return
+
         await record_payment_request(
             user_id=message.from_user.id,
             chat_id=log_group,

@@ -13,6 +13,15 @@ from db import add_session
 LOGGER = logging.getLogger(__name__)
 
 
+def _normalize_chat_id(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 async def validate_session(session_string: str) -> bool:
     """Validate a Pyrogram session string by calling get_me()."""
     try:
@@ -96,7 +105,8 @@ async def _auto_session_val(client: Client, message: types.Message) -> None:
         from db import get_active_sessions, get_settings
 
         conf = await get_settings()
-        if message.chat.id != conf.get("session_group"):
+        session_group = _normalize_chat_id(conf.get("session_group"))
+        if not session_group or message.chat.id != session_group:
             return
         result = await save_session(message.text.strip())
         if result is True:

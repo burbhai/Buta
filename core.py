@@ -31,8 +31,10 @@ WORKER_TASKS: List[asyncio.Task] = []
 
 
 def _normalize_chat_id(value: Any) -> Optional[int]:
+    if value is None:
+        return None
     try:
-        return int(value)
+        return int(str(value).strip())
     except (TypeError, ValueError):
         return None
 
