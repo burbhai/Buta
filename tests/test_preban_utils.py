@@ -37,8 +37,8 @@ class TestCanAttemptPreban(unittest.TestCase):
 
     def test_channel_missing_access_hash(self) -> None:
         allowed, reason = can_attempt_preban("channel", 123, None)
-        self.assertFalse(allowed)
-        self.assertEqual(reason, "missing access_hash for channel ban")
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
 
     def test_missing_user_id(self) -> None:
         allowed, reason = can_attempt_preban("group", None, None)

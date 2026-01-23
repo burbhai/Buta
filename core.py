@@ -263,10 +263,6 @@ async def with_floodwait(coro_factory, *, max_retries: int = 3):
 def can_attempt_preban(chat_type: str, user_id: Optional[int], access_hash: Optional[int]) -> Tuple[bool, Optional[str]]:
     if user_id is None:
         return False, "missing user_id"
-    if chat_type in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP, "group", "supergroup"}:
-        return True, None
-    if access_hash is None:
-        return False, "missing access_hash for channel ban"
     return True, None
 
 
@@ -439,7 +435,7 @@ async def force_preban_raw(
     """
     if chat_type == "group":
         await with_floodwait(
-            lambda: agent.kick_chat_member(chat_id, user_id=user_id),
+            lambda: agent.ban_chat_member(chat_id, user_id=user_id),
             max_retries=5,
         )
         return
@@ -655,12 +651,16 @@ async def preban_in_group(
                 reason=reason or "preban not possible",
             )
         try:
-            if dialog.chat.type in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}:
-                await with_floodwait(lambda: agent.kick_chat_member(chat_id, user_id=user_id), max_retries=5)
-                return BanAttemptResult(attempted=True, succeeded=True)
-            await force_preban_raw(agent, chat_id, user_id, access_hash, dialog.chat.type)
+            await with_floodwait(lambda: agent.ban_chat_member(chat_id, user_id=user_id), max_retries=5)
             return BanAttemptResult(attempted=True, succeeded=True)
         except (ChatAdminRequired, UserAdminInvalid, UserIdInvalid, PeerIdInvalid, RPCError) as exc:
+            if access_hash is not None and dialog.chat.type not in {enums.ChatType.GROUP, "group"}:
+                try:
+                    await force_preban_raw(agent, chat_id, user_id, access_hash, dialog.chat.type)
+                    return BanAttemptResult(attempted=True, succeeded=True)
+                except (ChatAdminRequired, UserAdminInvalid, UserIdInvalid, PeerIdInvalid, RPCError) as raw_exc:
+                    exc = raw_exc
+
             LOGGER.warning(
                 "Preban failed chat_id=%s user_id=%s username=%s error=%s",
                 chat_id,
