@@ -1,6 +1,6 @@
 # Buta PreBan Bot
 
-Production-ready Pyrogram bot with MongoDB (Motor) and in-memory fallback. The bot supports access-controlled “Send Love” pre-ban requests, payment approvals, session ingestion, and queue workers.
+[![Deploy to Heroku](https://www.herokucdn.com/deploy/button.svg)](https://www.heroku.com/deploy?template=https://github.com/burbhai/Buta)
 
 ## Requirements
 - Python 3.10+
