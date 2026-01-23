@@ -610,6 +610,7 @@ async def preban_in_group(
     fallback_entity_ids: Set[int],
     verify_enabled: bool,
     verify_delay: float,
+    me_member: Optional[Any] = None,
 ) -> Tuple[int, int, int, int, int, Optional[Dict[str, Any]]]:
     chat_id = dialog.chat.id
     chat_title = getattr(dialog.chat, "title", None)
@@ -625,11 +626,12 @@ async def preban_in_group(
         "failure_reason": None,
     }
 
-    try:
-        me_member = await with_floodwait(lambda: agent.get_chat_member(chat_id, "me"))
-    except Exception:
-        chat_data["skipped"] += 1
-        return 0, 0, 1, 0, 0, chat_data
+    if me_member is None:
+        try:
+            me_member = await with_floodwait(lambda: agent.get_chat_member(chat_id, "me"))
+        except Exception:
+            chat_data["skipped"] += 1
+            return 0, 0, 1, 0, 0, chat_data
 
     if not _can_restrict(me_member):
         chat_data["skipped"] += 1
@@ -774,9 +776,47 @@ async def _process_one_session(
         group_concurrency = max(1, int(getattr(Config, "GROUP_CONCURRENCY", 5)))
         group_sem = asyncio.Semaphore(group_concurrency)
         dialogs: List[Any] = []
+        eligible_members: Dict[int, Any] = {}
 
         async for dialog in agent.get_dialogs():
             if dialog.chat.type in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}:
+                chat_id = dialog.chat.id
+                chat_title = getattr(dialog.chat, "title", None)
+                try:
+                    me_member = await with_floodwait(lambda: agent.get_chat_member(chat_id, "me"))
+                except Exception:
+                    skipped += 1
+                    chat_metrics.setdefault(
+                        chat_id,
+                        {
+                            "title": chat_title,
+                            "attempts": 0,
+                            "bans": 0,
+                            "skipped": 1,
+                            "verified": 0,
+                            "removed": 0,
+                            "success": 0,
+                            "failure_reason": "unable to check ban rights",
+                        },
+                    )
+                    continue
+                if not _can_restrict(me_member):
+                    skipped += 1
+                    chat_metrics.setdefault(
+                        chat_id,
+                        {
+                            "title": chat_title,
+                            "attempts": 0,
+                            "bans": 0,
+                            "skipped": 1,
+                            "verified": 0,
+                            "removed": 0,
+                            "success": 0,
+                            "failure_reason": "missing ban rights",
+                        },
+                    )
+                    continue
+                eligible_members[chat_id] = me_member
                 dialogs.append(dialog)
             elif dialog.chat.type == enums.ChatType.CHANNEL:
                 continue
@@ -797,6 +837,7 @@ async def _process_one_session(
                     fallback_entity_ids=fallback_entity_ids,
                     verify_enabled=verify_enabled,
                     verify_delay=verify_delay,
+                    me_member=eligible_members.get(dialog.chat.id),
                 )
 
         results = await asyncio.gather(
