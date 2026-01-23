@@ -30,6 +30,13 @@ ban_queue: "asyncio.Queue[Tuple[Any, int]]" = asyncio.Queue(maxsize=_QUEUE_MAXSI
 WORKER_TASKS: List[asyncio.Task] = []
 
 
+def _normalize_chat_id(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # -----------------------------
 # User cache (access_hash store)
 # -----------------------------
@@ -786,7 +793,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             await mark_task_started(str(target_label))
 
             conf = await get_settings()
-            log_group = conf.get("log_group")
+            log_group = _normalize_chat_id(conf.get("log_group"))
             if not log_group:
                 LOGGER.warning("Log group not configured; proceeding without log notifications.")
             verify_enabled = conf.get("verify_enabled", True)
@@ -912,7 +919,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 )
             try:
                 conf = await get_settings()
-                log_group = conf.get("log_group")
+                log_group = _normalize_chat_id(conf.get("log_group"))
             except Exception:
                 log_group = None
             if log_group:

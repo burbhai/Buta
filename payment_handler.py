@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from pyrogram import Client, filters, types
+from pyrogram import Client, enums, filters, types
 from pyrogram.errors import RPCError
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 
@@ -19,6 +19,20 @@ from db import (
 LOGGER = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "buta:payment:"
+
+
+def _message_private_filter(_: Client, message: types.Message) -> bool:
+    return bool(getattr(message, "chat", None) and message.chat.type == enums.ChatType.PRIVATE)
+
+
+MESSAGE_PRIVATE_FILTER = filters.create(_message_private_filter)
+
+
+def _normalize_chat_id(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 async def _safe_reply(message: types.Message, text: str) -> None:
@@ -96,7 +110,7 @@ async def _handle_payment_screenshot(client: Client, message: types.Message) -> 
         if not message.from_user:
             return
         conf = await get_settings()
-        log_group = conf.get("log_group")
+        log_group = _normalize_chat_id(conf.get("log_group"))
 
         if not log_group:
             await _safe_reply(
@@ -208,7 +222,7 @@ async def _reject_user(client: Client, cb: types.CallbackQuery) -> None:
 def register_payment(app: Client) -> None:
     LOGGER.info("Registering payment handlers.")
     app.add_handler(MessageHandler(_payment_group_redirect, filters.photo & filters.group), group=5)
-    app.add_handler(MessageHandler(_handle_payment_screenshot, filters.photo & filters.private), group=5)
+    app.add_handler(MessageHandler(_handle_payment_screenshot, filters.photo & MESSAGE_PRIVATE_FILTER), group=5)
     app.add_handler(
         CallbackQueryHandler(
             _approve_user,

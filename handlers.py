@@ -63,6 +63,22 @@ COMMAND_PREFIXES = Config.COMMAND_PREFIXES
 GROUP_FILTER = filters.group
 if hasattr(filters, "supergroup"):
     GROUP_FILTER |= filters.supergroup
+
+
+def _message_private_filter(_: Client, message: types.Message) -> bool:
+    return bool(getattr(message, "chat", None) and message.chat.type == enums.ChatType.PRIVATE)
+
+
+def _message_group_filter(_: Client, message: types.Message) -> bool:
+    return bool(
+        getattr(message, "chat", None)
+        and message.chat.type in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}
+    )
+
+
+MESSAGE_PRIVATE_FILTER = filters.create(_message_private_filter)
+MESSAGE_GROUP_FILTER = filters.create(_message_group_filter)
+MESSAGE_PRIVATE_OR_GROUP_FILTER = MESSAGE_PRIVATE_FILTER | MESSAGE_GROUP_FILTER
 ANON_COMMAND_MESSAGE = (
     "⚠️ This command cannot be used anonymously. Please switch to your user account."
 )
@@ -724,7 +740,7 @@ def register_ui_and_commands(app: Client) -> None:
     )
     app.add_handler(CallbackQueryHandler(_log_callbacks), group=0)
     app.add_handler(
-        MessageHandler(_reject_anonymous_group_commands, command_filter(COMMANDS) & GROUP_FILTER),
+        MessageHandler(_reject_anonymous_group_commands, command_filter(COMMANDS) & MESSAGE_GROUP_FILTER),
         group=1,
     )
     app.add_handler(
@@ -755,19 +771,19 @@ def register_ui_and_commands(app: Client) -> None:
     )
 
     app.add_handler(
-        MessageHandler(_ping_command, command_filter("ping") & (filters.private | GROUP_FILTER)),
+        MessageHandler(_ping_command, command_filter("ping") & MESSAGE_PRIVATE_OR_GROUP_FILTER),
         group=3,
     )
     app.add_handler(
-        MessageHandler(_help_command, command_filter("help") & (filters.private | GROUP_FILTER)),
+        MessageHandler(_help_command, command_filter("help") & MESSAGE_PRIVATE_OR_GROUP_FILTER),
         group=3,
     )
     app.add_handler(
-        MessageHandler(_start_command, command_filter("start") & (filters.private | GROUP_FILTER)),
+        MessageHandler(_start_command, command_filter("start") & MESSAGE_PRIVATE_OR_GROUP_FILTER),
         group=3,
     )
     app.add_handler(
-        MessageHandler(_cancel_command, command_filter("cancel") & (filters.private | GROUP_FILTER)),
+        MessageHandler(_cancel_command, command_filter("cancel") & MESSAGE_PRIVATE_OR_GROUP_FILTER),
         group=3,
     )
 
@@ -813,25 +829,37 @@ def register_ui_and_commands(app: Client) -> None:
         group=3,
     )
 
-    app.add_handler(MessageHandler(_set_log_group, command_filter("set_log") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_set_session_group, command_filter("set_session") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_manage_sessions, command_filter("manage") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(
+        MessageHandler(_set_log_group, command_filter("set_log") & MESSAGE_PRIVATE_OR_GROUP_FILTER),
+        group=3,
+    )
+    app.add_handler(
+        MessageHandler(_set_session_group, command_filter("set_session") & MESSAGE_PRIVATE_OR_GROUP_FILTER),
+        group=3,
+    )
+    app.add_handler(
+        MessageHandler(_manage_sessions, command_filter("manage") & MESSAGE_PRIVATE_OR_GROUP_FILTER),
+        group=3,
+    )
 
     app.add_handler(
         CallbackQueryHandler(_remove_session, filters.regex(r"^buta:session:remove:(.+)$")),
         group=3,
     )
 
-    app.add_handler(MessageHandler(_handle_text_messages, filters.text & filters.private), group=3)
-    app.add_handler(MessageHandler(_preban_user, command_filter("preban") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_status_command, command_filter("status") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_health_command, command_filter("health") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_add_session_command, command_filter("addsession") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_add_sudo_command, command_filter("addsudo") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_remove_sudo_command, command_filter("remsudo") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_set_verify_mode, command_filter("verify") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_set_verify_delay, command_filter("verify_delay") & (filters.private | GROUP_FILTER)), group=3)
-    app.add_handler(MessageHandler(_set_command, command_filter("set") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_handle_text_messages, filters.text & MESSAGE_PRIVATE_FILTER), group=3)
+    app.add_handler(MessageHandler(_preban_user, command_filter("preban") & MESSAGE_PRIVATE_OR_GROUP_FILTER), group=3)
+    app.add_handler(MessageHandler(_status_command, command_filter("status") & MESSAGE_PRIVATE_OR_GROUP_FILTER), group=3)
+    app.add_handler(MessageHandler(_health_command, command_filter("health") & MESSAGE_PRIVATE_OR_GROUP_FILTER), group=3)
+    app.add_handler(MessageHandler(_add_session_command, command_filter("addsession") & MESSAGE_PRIVATE_OR_GROUP_FILTER), group=3)
+    app.add_handler(MessageHandler(_add_sudo_command, command_filter("addsudo") & MESSAGE_PRIVATE_OR_GROUP_FILTER), group=3)
+    app.add_handler(MessageHandler(_remove_sudo_command, command_filter("remsudo") & MESSAGE_PRIVATE_OR_GROUP_FILTER), group=3)
+    app.add_handler(MessageHandler(_set_verify_mode, command_filter("verify") & MESSAGE_PRIVATE_OR_GROUP_FILTER), group=3)
+    app.add_handler(
+        MessageHandler(_set_verify_delay, command_filter("verify_delay") & MESSAGE_PRIVATE_OR_GROUP_FILTER),
+        group=3,
+    )
+    app.add_handler(MessageHandler(_set_command, command_filter("set") & MESSAGE_PRIVATE_OR_GROUP_FILTER), group=3)
 
 
 async def _log_commands(client: Client, message: types.Message) -> None:
@@ -1661,11 +1689,11 @@ async def _set_command(client: Client, message: types.Message) -> None:
 def register_fallbacks(app: Client) -> None:
     LOGGER.info("Registering fallback handlers.")
     app.add_handler(
-        MessageHandler(_unknown_command, filters.text & (filters.private | GROUP_FILTER)),
+        MessageHandler(_unknown_command, filters.text & MESSAGE_PRIVATE_OR_GROUP_FILTER),
         group=100,
     )
     app.add_handler(
-        MessageHandler(_fallback_command_response, filters.text & (filters.private | GROUP_FILTER)),
+        MessageHandler(_fallback_command_response, filters.text & MESSAGE_PRIVATE_OR_GROUP_FILTER),
         group=200,
     )
 
