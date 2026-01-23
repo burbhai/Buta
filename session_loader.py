@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import uuid
 
-from pyrogram import Client
+from pyrogram import Client, filters, types
 from pyrogram.errors import RPCError
+from pyrogram.handlers import MessageHandler
 
 from config import Config
 from db import add_session
@@ -85,3 +86,38 @@ async def test_all_sessions() -> None:
                 await deactivate_session(phone)
             except Exception:
                 LOGGER.exception("Failed to deactivate invalid session for %s.", phone)
+
+
+async def _auto_session_val(client: Client, message: types.Message) -> None:
+    """Auto-validate session strings posted in the configured session group."""
+    try:
+        if not message.from_user or not message.text:
+            return
+        from db import get_active_sessions, get_settings
+
+        conf = await get_settings()
+        if message.chat.id != conf.get("session_group"):
+            return
+        result = await save_session(message.text.strip())
+        if result is True:
+            active_sessions = await get_active_sessions()
+            await message.reply(
+                "✅ Session added successfully.\n"
+                f"📊 Active Sessions: {len(active_sessions)}",
+            )
+        elif result is None:
+            await message.reply(
+                "⚠️ Session validated but failed to save. The database may be down.",
+            )
+        else:
+            await message.reply("❌ Session invalid or expired. Try again.")
+    except RPCError:
+        await message.reply("❌ Session invalid or expired. Try again.")
+    except Exception:
+        LOGGER.exception("Auto session validation failed.")
+        await message.reply("❌ Session invalid or expired. Try again.")
+
+
+def register_session_ingest(app: Client) -> None:
+    LOGGER.info("Registering session ingestion handlers.")
+    app.add_handler(MessageHandler(_auto_session_val, filters.text & filters.group), group=4)

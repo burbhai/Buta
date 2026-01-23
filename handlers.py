@@ -1,24 +1,24 @@
-From __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from pyrogram import Client, StopPropagation, filters, types
-from pyrogram.handlers import MessageHandler
 from pyrogram.errors import FloodWait, RPCError
+from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 
-from bot_instance import bot
 from config import Config
 from core import ban_queue, get_worker_status
 from db import (
     add_session,
+    check_db_health,
     deactivate_session,
     get_active_sessions,
     get_active_sudo_users,
-    check_db_health,
     give_access,
     has_access,
     revoke_access,
@@ -26,10 +26,8 @@ from db import (
 )
 from queue_handler import get_queue_snapshot, get_queue_status
 
-LOVE_TRACKER: dict[int, dict[str, float | str]] = {}
-LOVE_TRACKER_TTL_SECONDS = 600
-REMOVE_SESSION_TOKENS: dict[str, str] = {}
 LOGGER = logging.getLogger(__name__)
+
 COMMANDS = [
     "start",
     "help",
@@ -46,6 +44,7 @@ COMMANDS = [
     "set_log",
     "set_session",
     "health",
+    "cancel",
 ]
 COMMAND_PREFIXES = Config.COMMAND_PREFIXES
 GROUP_FILTER = filters.group
@@ -55,6 +54,23 @@ ANON_COMMAND_MESSAGE = (
     "⚠️ This command cannot be used anonymously. Please switch to your user account."
 )
 
+CALLBACK_PREFIX = "buta:"
+
+
+@dataclass
+class LoveState:
+    state: str
+    updated_at: float
+
+
+LOVE_TRACKER: dict[int, LoveState] = {}
+LOVE_TRACKER_TTL_SECONDS = 120
+REMOVE_SESSION_TOKENS: dict[str, str] = {}
+
+
+# -----------------------------
+# Utilities
+# -----------------------------
 
 def _extract_command(text: str | None) -> Optional[str]:
     """Extract a command name from text using configured prefixes."""
@@ -63,7 +79,7 @@ def _extract_command(text: str | None) -> Optional[str]:
     stripped = text.strip()
     for prefix in COMMAND_PREFIXES:
         if stripped.startswith(prefix):
-            payload = stripped[len(prefix):]
+            payload = stripped[len(prefix) :]
             if not payload:
                 return None
             command = payload.split(maxsplit=1)[0]
@@ -76,66 +92,39 @@ def command_filter(commands):
     return filters.command(commands, prefixes=COMMAND_PREFIXES)
 
 
-def _has_handler(app: Client, callback_names: set[str]) -> bool:
-    """Check whether a handler callback is already registered."""
-    for group in app.dispatcher.groups.values():
-        for handler in group:
-            if isinstance(handler, MessageHandler):
-                callback = getattr(handler.callback, "__name__", "")
-                if callback in callback_names:
-                    return True
-    return False
-
-
-def register_handlers(app: Client) -> None:
-    """Register handlers and fallback commands."""
-    LOGGER.info("Registering handlers.")
-    if not _has_handler(app, {"start", "start_handler"}):
-        @app.on_message(command_filter("start") & (filters.private | GROUP_FILTER))
-        async def start_handler(client, message):
-            await _safe_reply(message, "✅ Bot is alive.")
-    if not _has_handler(app, {"ping_command", "ping_handler"}):
-        @app.on_message(command_filter("ping") & (filters.private | GROUP_FILTER))
-        async def ping_handler(client, message):
-            await _safe_reply(message, "✅ Bot is alive.")
-    LOGGER.info("Handlers registered.")
-
-
 def _cleanup_love_tracker(now: Optional[float] = None) -> None:
-    """Remove expired love tracker states."""
     current_time = time.time() if now is None else now
     expired = [
         user_id
         for user_id, entry in LOVE_TRACKER.items()
-        if current_time - float(entry.get("updated_at", 0)) > LOVE_TRACKER_TTL_SECONDS
+        if current_time - entry.updated_at > LOVE_TRACKER_TTL_SECONDS
     ]
     for user_id in expired:
         LOVE_TRACKER.pop(user_id, None)
 
+
 def _set_love_state(user_id: int, state: str) -> None:
-    """Store love tracker state with timestamp."""
     _cleanup_love_tracker()
-    LOVE_TRACKER[user_id] = {"state": state, "updated_at": time.time()}
+    LOVE_TRACKER[user_id] = LoveState(state=state, updated_at=time.time())
+
 
 def _get_love_state(user_id: int) -> Optional[str]:
-    """Fetch love tracker state if not expired."""
     _cleanup_love_tracker()
     entry = LOVE_TRACKER.get(user_id)
     if not entry:
         return None
-    updated_at = float(entry.get("updated_at", 0))
-    if time.time() - updated_at > LOVE_TRACKER_TTL_SECONDS:
+    if time.time() - entry.updated_at > LOVE_TRACKER_TTL_SECONDS:
         LOVE_TRACKER.pop(user_id, None)
         return None
-    entry["updated_at"] = time.time()
-    return str(entry.get("state"))
+    LOVE_TRACKER[user_id] = LoveState(state=entry.state, updated_at=time.time())
+    return entry.state
+
 
 def _clear_love_state(user_id: int) -> None:
-    """Clear stored love tracker state."""
     LOVE_TRACKER.pop(user_id, None)
 
+
 async def _get_session_count() -> int:
-    """Return the active session count, falling back safely on errors."""
     try:
         sessions = await get_active_sessions()
     except Exception:
@@ -144,22 +133,28 @@ async def _get_session_count() -> int:
     return len(sessions)
 
 
-async def _safe_reply(message: types.Message, text: str, reply_markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
-    """Safely reply to a message with fallback send_message."""
+async def _safe_reply(
+    message: types.Message,
+    text: str,
+    reply_markup: Optional[types.InlineKeyboardMarkup] = None,
+) -> None:
     try:
         await message.reply(text, reply_markup=reply_markup)
         setattr(message, "_buta_replied", True)
     except Exception:
         LOGGER.exception("Failed to reply to message.")
         try:
-            await bot.send_message(message.chat.id, text, reply_markup=reply_markup)
+            await message._client.send_message(message.chat.id, text, reply_markup=reply_markup)
             setattr(message, "_buta_replied", True)
         except Exception:
             LOGGER.exception("Failed to send fallback reply.")
 
 
-async def _safe_edit(cb: types.CallbackQuery, text: str, reply_markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
-    """Safely edit callback messages with fallback reply."""
+async def _safe_edit(
+    cb: types.CallbackQuery,
+    text: str,
+    reply_markup: Optional[types.InlineKeyboardMarkup] = None,
+) -> None:
     try:
         await cb.message.edit_text(text, reply_markup=reply_markup)
     except Exception:
@@ -169,7 +164,7 @@ async def _safe_edit(cb: types.CallbackQuery, text: str, reply_markup: Optional[
         except Exception:
             LOGGER.exception("Failed to send fallback reply.")
             try:
-                await bot.send_message(cb.message.chat.id, text, reply_markup=reply_markup)
+                await cb.message._client.send_message(cb.message.chat.id, text, reply_markup=reply_markup)
             except Exception:
                 LOGGER.exception("Failed to send fallback fallback reply.")
 
@@ -180,7 +175,6 @@ async def _answer_cb(
     *,
     show_alert: bool = False,
 ) -> None:
-    """Answer a callback query with optional text."""
     try:
         if text is None:
             await cb.answer()
@@ -190,8 +184,23 @@ async def _answer_cb(
         LOGGER.exception("Failed to answer callback query.")
 
 
+async def _reject_anonymous_command(message: types.Message) -> bool:
+    if message.from_user is None or message.sender_chat is not None:
+        await _safe_reply(message, ANON_COMMAND_MESSAGE)
+        return True
+    return False
+
+
+async def _require_owner(message: types.Message) -> bool:
+    if await _reject_anonymous_command(message):
+        return False
+    if not message.from_user or message.from_user.id not in Config.OWNERS:
+        await _safe_reply(message, "❌ This command is restricted to owners.")
+        return False
+    return True
+
+
 def _log_command_update(message: types.Message) -> None:
-    """Log raw command updates for debugging."""
     from_user_id = message.from_user.id if message.from_user else None
     sender_chat_id = message.sender_chat.id if message.sender_chat else None
     text = message.text or message.caption
@@ -205,16 +214,7 @@ def _log_command_update(message: types.Message) -> None:
     )
 
 
-async def _reject_anonymous_command(message: types.Message) -> bool:
-    """Reject commands sent via anonymous admin or sender_chat."""
-    if message.from_user is None or message.sender_chat is not None:
-        await _safe_reply(message, ANON_COMMAND_MESSAGE)
-        return True
-    return False
-
-
 def _log_command_invocation(message: types.Message, command: str) -> None:
-    """Log who invoked a command."""
     user_id = message.from_user.id if message.from_user else None
     LOGGER.info(
         "Command invoked: %s by user_id=%s chat_id=%s chat_type=%s",
@@ -226,7 +226,6 @@ def _log_command_invocation(message: types.Message, command: str) -> None:
 
 
 def _log_callback_invocation(cb: types.CallbackQuery) -> None:
-    """Log callback query data for debugging."""
     from_user_id = cb.from_user.id if cb.from_user else None
     message_chat_id = cb.message.chat.id if cb.message else None
     LOGGER.info(
@@ -237,18 +236,7 @@ def _log_callback_invocation(cb: types.CallbackQuery) -> None:
     )
 
 
-async def _require_owner(message: types.Message) -> bool:
-    """Return True if the sender is an owner; otherwise send a warning."""
-    if await _reject_anonymous_command(message):
-        return False
-    if not message.from_user or message.from_user.id not in Config.OWNERS:
-        await _safe_reply(message, "❌ This command is restricted to owners.")
-        return False
-    return True
-
-
-async def _resolve_user_id(client, raw: str) -> Tuple[Optional[int], Optional[str]]:
-    """Resolve a user identifier to user_id or fall back to username."""
+async def _resolve_user_id(client: Client, raw: str) -> Tuple[Optional[int], Optional[str]]:
     raw = raw.strip().lstrip("@")
     if not raw:
         return None, None
@@ -267,124 +255,149 @@ async def _resolve_user_id(client, raw: str) -> Tuple[Optional[int], Optional[st
     except RPCError:
         return None, raw
 
+
+# -----------------------------
+# UI builders
+# -----------------------------
+
+def _cb(action: str, *parts: str) -> str:
+    if parts:
+        return f"{CALLBACK_PREFIX}{action}:" + ":".join(parts)
+    return f"{CALLBACK_PREFIX}{action}"
+
+
 def _start_keyboard(is_owner: bool, has_sudo: bool) -> types.InlineKeyboardMarkup:
-    """Build the /start keyboard with quick actions and role-specific tools."""
     rows = [
         [
-            types.InlineKeyboardButton("❤️ Love", callback_data="love_send"),
-            types.InlineKeyboardButton("🆘 Help", callback_data="start_help"),
-            types.InlineKeyboardButton("🔁 Ping", callback_data="start_ping"),
+            types.InlineKeyboardButton("❤️ Love", callback_data=_cb("love:send")),
+            types.InlineKeyboardButton("🆘 Help", callback_data=_cb("start:help")),
+            types.InlineKeyboardButton("🔁 Ping", callback_data=_cb("start:ping")),
         ]
     ]
     if is_owner:
         rows.extend(
             [
+                [types.InlineKeyboardButton("👑 Owner Panel", callback_data=_cb("owner:panel"))],
                 [
-                    types.InlineKeyboardButton("👑 Owner Panel", callback_data="owner_panel"),
+                    types.InlineKeyboardButton(
+                        "📥 Manage Sessions", callback_data=_cb("owner:manage_sessions")
+                    ),
+                    types.InlineKeyboardButton("📄 Sudo List", callback_data=_cb("owner:sudo_list")),
                 ],
                 [
-                    types.InlineKeyboardButton("📥 Manage Sessions", callback_data="owner_manage_sessions"),
-                    types.InlineKeyboardButton("📄 Sudo List", callback_data="owner_sudo_list"),
-                ],
-                [
-                    types.InlineKeyboardButton("📝 Set Log Group", callback_data="owner_set_log"),
-                    types.InlineKeyboardButton("🔐 Set Session Group", callback_data="owner_set_session"),
+                    types.InlineKeyboardButton("📝 Set Log Group", callback_data=_cb("owner:set_log")),
+                    types.InlineKeyboardButton(
+                        "🔐 Set Session Group", callback_data=_cb("owner:set_session")
+                    ),
                 ],
             ]
         )
     elif not has_sudo:
-        rows.append([types.InlineKeyboardButton("💳 Payment Options", callback_data="payment_info")])
+        rows.append(
+            [types.InlineKeyboardButton("💳 Payment Options", callback_data=_cb("payment:info"))]
+        )
     return types.InlineKeyboardMarkup(rows)
 
+
 def _sudo_panel_keyboard() -> types.InlineKeyboardMarkup:
-    """Return the sudo panel keyboard."""
     return types.InlineKeyboardMarkup(
         [
-            [types.InlineKeyboardButton("💌 Send Love", callback_data="love_send")],
-            [types.InlineKeyboardButton("🔙 Back", callback_data="home")],
+            [types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send"))],
+            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))],
         ]
     )
+
 
 def _owner_panel_keyboard() -> types.InlineKeyboardMarkup:
-    """Return the owner panel keyboard."""
     return types.InlineKeyboardMarkup(
         [
             [
-                types.InlineKeyboardButton("➕ Add Sudo", callback_data="owner_add_sudo"),
-                types.InlineKeyboardButton("➖ Remove Sudo", callback_data="owner_remove_sudo"),
+                types.InlineKeyboardButton("➕ Add Sudo", callback_data=_cb("owner:add_sudo")),
+                types.InlineKeyboardButton("➖ Remove Sudo", callback_data=_cb("owner:remove_sudo")),
             ],
             [
-                types.InlineKeyboardButton("📄 Sudo List", callback_data="owner_sudo_list"),
-                types.InlineKeyboardButton("📥 Manage Sessions", callback_data="owner_manage_sessions"),
+                types.InlineKeyboardButton("📄 Sudo List", callback_data=_cb("owner:sudo_list")),
+                types.InlineKeyboardButton(
+                    "📥 Manage Sessions", callback_data=_cb("owner:manage_sessions")
+                ),
             ],
             [
-                types.InlineKeyboardButton("📝 Set Log Group", callback_data="owner_set_log"),
-                types.InlineKeyboardButton("🔐 Set Session Group", callback_data="owner_set_session"),
+                types.InlineKeyboardButton("📝 Set Log Group", callback_data=_cb("owner:set_log")),
+                types.InlineKeyboardButton(
+                    "🔐 Set Session Group", callback_data=_cb("owner:set_session")
+                ),
             ],
-            [types.InlineKeyboardButton("🔙 Back", callback_data="home")],
+            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))],
         ]
     )
+
 
 def _payment_keyboard() -> types.InlineKeyboardMarkup:
-    """Return payment helper keyboard."""
     return types.InlineKeyboardMarkup(
         [
-            [types.InlineKeyboardButton("📤 Send Payment Screenshot", callback_data="payment_how")],
-            [types.InlineKeyboardButton("🔙 Back", callback_data="home")],
+            [
+                types.InlineKeyboardButton(
+                    "📤 Send Payment Screenshot", callback_data=_cb("payment:how")
+                )
+            ],
+            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))],
         ]
     )
 
+
 def _owner_action_keyboard(action: str) -> types.InlineKeyboardMarkup:
-    """Return owner action keyboard for a given action."""
     return types.InlineKeyboardMarkup(
         [
-            [types.InlineKeyboardButton("🆔 Provide User ID/Username", callback_data=f"{action}_prompt")],
-            [types.InlineKeyboardButton("🔙 Back", callback_data="owner_panel")],
+            [
+                types.InlineKeyboardButton(
+                    "🆔 Provide User ID/Username", callback_data=_cb(f"{action}:prompt")
+                )
+            ],
+            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("owner:panel"))],
         ]
     )
 
 
 def _help_keyboard() -> types.InlineKeyboardMarkup:
-    """Return help shortcut buttons for owners."""
     return types.InlineKeyboardMarkup(
         [
             [
-                types.InlineKeyboardButton("✅ Verify On", callback_data="help_verify_on"),
-                types.InlineKeyboardButton("🛑 Verify Off", callback_data="help_verify_off"),
+                types.InlineKeyboardButton("✅ Verify On", callback_data=_cb("help:verify:on")),
+                types.InlineKeyboardButton("🛑 Verify Off", callback_data=_cb("help:verify:off")),
             ],
-            [types.InlineKeyboardButton("📥 Manage Sessions", callback_data="help_manage")],
-            [types.InlineKeyboardButton("🔙 Back", callback_data="home")],
+            [types.InlineKeyboardButton("📥 Manage Sessions", callback_data=_cb("help:manage"))],
+            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))],
         ]
     )
 
 
 def _dm_only_message() -> str:
-    """Return a DM-only warning string."""
     return "⚠️ This feature is available in private chat. Please DM the bot."
 
+
 def _build_remove_session_callback(phone: str) -> str:
-    """Build callback data for removing a session with length safety."""
     safe_phone = phone.strip()
-    prefix = "rem_"
+    prefix = f"{CALLBACK_PREFIX}session:remove:"
     max_length = 64
     if len(prefix) + len(safe_phone) <= max_length:
         return f"{prefix}{safe_phone}"
     token = uuid.uuid4().hex[:12]
     REMOVE_SESSION_TOKENS[token] = safe_phone
-    return f"{prefix}{token}"
+    return f"{CALLBACK_PREFIX}session:remove:{token}"
+
 
 def _resolve_remove_session_target(token: str) -> str:
-    """Resolve callback token back to the phone identifier."""
     return REMOVE_SESSION_TOKENS.pop(token, token)
 
+
 def _build_help_text(is_owner: bool, has_sudo: bool) -> str:
-    """Build help text for /help and inline help callbacks."""
     text = (
         "🆘 **Help Menu**\n\n"
         "Common commands:\n"
         "• /ping - Check if bot is alive\n"
         "• /preban <user_id or @username> - Queue a pre-ban\n"
-        "• /status - Queue status\n\n"
+        "• /status - Queue status\n"
+        "• /cancel - Cancel active Send Love flow\n\n"
     )
     if is_owner:
         text += (
@@ -395,6 +408,8 @@ def _build_help_text(is_owner: bool, has_sudo: bool) -> str:
             "• /verify <on|off>\n"
             "• /verify_delay <seconds>\n"
             "• /manage - List sessions\n"
+            "• /set_log - Set log group\n"
+            "• /set_session - Set session intake group\n"
             "• /set <key> <value> - Configure defaults\n"
         )
     elif has_sudo:
@@ -403,8 +418,8 @@ def _build_help_text(is_owner: bool, has_sudo: bool) -> str:
         text += "You do not have sudo access yet. Submit payment proof to gain access."
     return text
 
+
 async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
-    """Ensure at least one session exists before starting pre-ban via button."""
     if not cb.from_user:
         return False
     is_owner = cb.from_user.id in Config.OWNERS
@@ -420,59 +435,129 @@ async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
         return False
     return True
 
-@bot.on_message(command_filter(COMMANDS))
-async def log_commands(bot, message):
-    """Log command traffic for debugging."""
+
+# -----------------------------
+# Handlers
+# -----------------------------
+
+
+def register_ui_and_commands(app: Client) -> None:
+    LOGGER.info("Registering UI and command handlers.")
+
+    app.add_handler(
+        MessageHandler(_log_commands, command_filter(COMMANDS)),
+        group=0,
+    )
+    app.add_handler(CallbackQueryHandler(_log_callbacks), group=0)
+    app.add_handler(
+        MessageHandler(_reject_anonymous_group_commands, command_filter(COMMANDS) & GROUP_FILTER),
+        group=1,
+    )
+    app.add_handler(
+        MessageHandler(
+            _channel_command_redirect,
+            command_filter(
+                [
+                    "start",
+                    "help",
+                    "ping",
+                    "preban",
+                    "status",
+                    "addsession",
+                    "addsudo",
+                    "remsudo",
+                    "verify",
+                    "verify_delay",
+                    "manage",
+                    "set_log",
+                    "set_session",
+                    "health",
+                    "cancel",
+                ]
+            )
+            & filters.channel,
+        ),
+        group=2,
+    )
+
+    app.add_handler(
+        MessageHandler(_ping_command, command_filter("ping") & (filters.private | GROUP_FILTER)),
+        group=3,
+    )
+    app.add_handler(
+        MessageHandler(_help_command, command_filter("help") & (filters.private | GROUP_FILTER)),
+        group=3,
+    )
+    app.add_handler(
+        MessageHandler(_start_command, command_filter("start") & (filters.private | GROUP_FILTER)),
+        group=3,
+    )
+    app.add_handler(
+        MessageHandler(_cancel_command, command_filter("cancel") & (filters.private | GROUP_FILTER)),
+        group=3,
+    )
+
+    app.add_handler(CallbackQueryHandler(_start_help, filters.regex(r"^(?:buta:start:help|start_help)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_start_ping, filters.regex(r"^(?:buta:start:ping|start_ping)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_go_home, filters.regex(r"^(?:buta:home|home)$") & filters.private), group=3)
+
+    app.add_handler(CallbackQueryHandler(_payment_info, filters.regex(r"^(?:buta:payment:info|payment_info)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_payment_how, filters.regex(r"^(?:buta:payment:how|payment_how)$") & filters.private), group=3)
+
+    app.add_handler(CallbackQueryHandler(_love_send, filters.regex(r"^(?:buta:love:send|love_send)$") & filters.private), group=3)
+
+    app.add_handler(CallbackQueryHandler(_owner_panel, filters.regex(r"^(?:buta:owner:panel|owner_panel)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_add_sudo, filters.regex(r"^(?:buta:owner:add_sudo|owner_add_sudo)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_remove_sudo, filters.regex(r"^(?:buta:owner:remove_sudo|owner_remove_sudo)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_add_prompt, filters.regex(r"^(?:buta:owner:add_sudo:prompt|owner_add_sudo_prompt)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_remove_prompt, filters.regex(r"^(?:buta:owner:remove_sudo:prompt|owner_remove_sudo_prompt)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_sudo_list, filters.regex(r"^(?:buta:owner:sudo_list|owner_sudo_list)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_manage_sessions, filters.regex(r"^(?:buta:owner:manage_sessions|owner_manage_sessions)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_set_log_cb, filters.regex(r"^(?:buta:owner:set_log|owner_set_log)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_set_session_cb, filters.regex(r"^(?:buta:owner:set_session|owner_set_session)$") & filters.private), group=3)
+
+    app.add_handler(CallbackQueryHandler(_help_verify_toggle, filters.regex(r"^(?:buta:help:verify:(?:on|off)|help_verify_(?:on|off))$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_help_manage_sessions, filters.regex(r"^(?:buta:help:manage|help_manage)$") & filters.private), group=3)
+
+    app.add_handler(MessageHandler(_set_log_group, command_filter("set_log") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_set_session_group, command_filter("set_session") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_manage_sessions, command_filter("manage") & (filters.private | GROUP_FILTER)), group=3)
+
+    app.add_handler(CallbackQueryHandler(_remove_session, filters.regex(r"^(?:buta:session:remove:|rem_)(.+)$")), group=3)
+
+    app.add_handler(MessageHandler(_handle_text_messages, filters.text & filters.private), group=3)
+    app.add_handler(MessageHandler(_preban_user, command_filter("preban") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_status_command, command_filter("status") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_health_command, command_filter("health") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_add_session_command, command_filter("addsession") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_add_sudo_command, command_filter("addsudo") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_remove_sudo_command, command_filter("remsudo") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_set_verify_mode, command_filter("verify") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_set_verify_delay, command_filter("verify_delay") & (filters.private | GROUP_FILTER)), group=3)
+    app.add_handler(MessageHandler(_set_command, command_filter("set") & (filters.private | GROUP_FILTER)), group=3)
+
+
+async def _log_commands(client: Client, message: types.Message) -> None:
     _log_command_update(message)
 
 
-@bot.on_callback_query()
-async def log_callbacks(bot, cb):
-    """Log callback query traffic for debugging."""
+async def _log_callbacks(client: Client, cb: types.CallbackQuery) -> None:
     _log_callback_invocation(cb)
 
 
-@bot.on_message(command_filter(COMMANDS) & GROUP_FILTER)
-async def reject_anonymous_group_commands(bot, message):
-    """Reject anonymous admin commands in groups."""
+async def _reject_anonymous_group_commands(client: Client, message: types.Message) -> None:
     if await _reject_anonymous_command(message):
         raise StopPropagation
 
 
-# BotFather privacy mode must be disabled so the bot can read group commands.
-
-
-@bot.on_message(
-    command_filter(
-        [
-            "start",
-            "help",
-            "ping",
-            "preban",
-            "status",
-            "addsession",
-            "addsudo",
-            "remsudo",
-            "verify",
-            "verify_delay",
-            "manage",
-            "set_log",
-            "set_session",
-            "health",
-        ]
-    )
-    & filters.channel
-)
-async def channel_command_redirect(bot, message):
-    """Redirect channel command usage to DM."""
+async def _channel_command_redirect(client: Client, message: types.Message) -> None:
     try:
         await _safe_reply(message, _dm_only_message())
     except Exception:
         LOGGER.exception("Channel redirect handler failed.")
 
-@bot.on_message(command_filter("ping") & (filters.private | GROUP_FILTER))
-async def ping_command(bot, message):
-    """Respond to /ping for responsiveness checks."""
+
+async def _ping_command(client: Client, message: types.Message) -> None:
     try:
         if await _reject_anonymous_command(message):
             return
@@ -484,9 +569,7 @@ async def ping_command(bot, message):
         await _safe_reply(message, "❌ Failed to respond to ping.")
 
 
-@bot.on_message(command_filter("help") & (filters.private | GROUP_FILTER))
-async def help_command(bot, message):
-    """Show help information and shortcuts."""
+async def _help_command(client: Client, message: types.Message) -> None:
     try:
         if await _reject_anonymous_command(message):
             return
@@ -501,9 +584,8 @@ async def help_command(bot, message):
         LOGGER.exception("Help command failed.")
         await _safe_reply(message, "❌ Failed to load help information.")
 
-@bot.on_message(command_filter("start") & (filters.private | GROUP_FILTER))
-async def start(bot, message):
-    """Handle /start for onboarding."""
+
+async def _start_command(client: Client, message: types.Message) -> None:
     try:
         if await _reject_anonymous_command(message):
             return
@@ -521,9 +603,7 @@ async def start(bot, message):
             intro = "👋 **Welcome!**\n\nPlease DM me for full instructions."
         if is_owner:
             title = "👑 **Owner Panel**"
-            body = (
-                "Welcome, Owner! Use the panel below to manage sudo users, sessions, and log groups."
-            )
+            body = "Welcome, Owner! Use the panel below to manage sudo users, sessions, and log groups."
         elif has_sudo:
             title = "💌 **Sudo Access Granted**"
             body = "Tap **Send Love** to start a pre-ban request with a username."
@@ -542,9 +622,22 @@ async def start(bot, message):
         LOGGER.exception("Start handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^start_help$") & filters.private)
-async def start_help(bot, cb):
-    """Show help content from the /start quick action."""
+
+async def _cancel_command(client: Client, message: types.Message) -> None:
+    try:
+        if await _reject_anonymous_command(message):
+            return
+        _log_command_invocation(message, "cancel")
+        if not message.from_user:
+            return
+        _clear_love_state(message.from_user.id)
+        await _safe_reply(message, "✅ Cancelled. You can use /preban or Send Love again anytime.")
+    except Exception:
+        LOGGER.exception("Cancel command failed.")
+        await _safe_reply(message, "❌ Failed to cancel. Please try again.")
+
+
+async def _start_help(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user:
             return
@@ -558,9 +651,8 @@ async def start_help(bot, cb):
         LOGGER.exception("Start help callback failed.")
         await _safe_edit(cb, "❌ Failed to load help information.")
 
-@bot.on_callback_query(filters.regex(r"^start_ping$") & filters.private)
-async def start_ping(bot, cb):
-    """Respond to ping from inline button."""
+
+async def _start_ping(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user:
             return
@@ -577,9 +669,8 @@ async def start_ping(bot, cb):
         LOGGER.exception("Start ping callback failed.")
         await _safe_edit(cb, "❌ Failed to respond to ping.")
 
-@bot.on_callback_query(filters.regex(r"^home$") & filters.private)
-async def go_home(bot, cb):
-    """Return to home screen in callbacks."""
+
+async def _go_home(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user:
             return
@@ -588,9 +679,7 @@ async def go_home(bot, cb):
         has_sudo = is_owner or await has_access(cb.from_user.id)
         if is_owner:
             title = "👑 **Owner Panel**"
-            body = (
-                "Welcome, Owner! Use the panel below to manage sudo users, sessions, and log groups."
-            )
+            body = "Welcome, Owner! Use the panel below to manage sudo users, sessions, and log groups."
         elif has_sudo:
             title = "💌 **Sudo Access Granted**"
             body = "Tap **Send Love** to start a pre-ban request with a username."
@@ -609,9 +698,8 @@ async def go_home(bot, cb):
         LOGGER.exception("Home handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^payment_info$") & filters.private)
-async def payment_info(bot, cb):
-    """Show payment info screen."""
+
+async def _payment_info(client: Client, cb: types.CallbackQuery) -> None:
     try:
         await _answer_cb(cb)
         await _safe_edit(
@@ -625,9 +713,8 @@ async def payment_info(bot, cb):
         LOGGER.exception("Payment info handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^payment_how$") & filters.private)
-async def payment_how(bot, cb):
-    """Show payment submission instructions."""
+
+async def _payment_how(client: Client, cb: types.CallbackQuery) -> None:
     try:
         await _answer_cb(cb)
         await _safe_edit(
@@ -640,9 +727,8 @@ async def payment_how(bot, cb):
         LOGGER.exception("Payment how handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^love_send$") & filters.private)
-async def love_send(bot, cb):
-    """Start sudo pre-ban flow via button."""
+
+async def _love_send(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user:
             return
@@ -663,16 +749,16 @@ async def love_send(bot, cb):
         await _safe_edit(
             cb,
             "💌 **Send Love**\n\n"
-            "Please reply with the target **@username** or **user ID**.",
+            "Please reply with the target **@username** or **user ID**.\n"
+            "Use /cancel to stop this flow.",
             reply_markup=_sudo_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Love send handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_panel$") & filters.private)
-async def owner_panel(bot, cb):
-    """Render owner panel screen."""
+
+async def _owner_panel(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -688,9 +774,8 @@ async def owner_panel(bot, cb):
         LOGGER.exception("Owner panel handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_add_sudo$") & filters.private)
-async def owner_add_sudo(bot, cb):
-    """Start add sudo flow."""
+
+async def _owner_add_sudo(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -700,15 +785,14 @@ async def owner_add_sudo(bot, cb):
             cb,
             "➕ **Add Sudo User**\n\n"
             "Tap the button below and send the user ID or @username.",
-            reply_markup=_owner_action_keyboard("owner_add_sudo"),
+            reply_markup=_owner_action_keyboard("owner:add_sudo"),
         )
     except Exception:
         LOGGER.exception("Owner add sudo handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_remove_sudo$") & filters.private)
-async def owner_remove_sudo(bot, cb):
-    """Start remove sudo flow."""
+
+async def _owner_remove_sudo(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -718,15 +802,14 @@ async def owner_remove_sudo(bot, cb):
             cb,
             "➖ **Remove Sudo User**\n\n"
             "Tap the button below and send the user ID or @username.",
-            reply_markup=_owner_action_keyboard("owner_remove_sudo"),
+            reply_markup=_owner_action_keyboard("owner:remove_sudo"),
         )
     except Exception:
         LOGGER.exception("Owner remove sudo handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_add_sudo_prompt$") & filters.private)
-async def owner_add_prompt(bot, cb):
-    """Prompt for sudo user identifier."""
+
+async def _owner_add_prompt(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -742,9 +825,8 @@ async def owner_add_prompt(bot, cb):
         LOGGER.exception("Owner add prompt handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_remove_sudo_prompt$") & filters.private)
-async def owner_remove_prompt(bot, cb):
-    """Prompt to remove sudo user."""
+
+async def _owner_remove_prompt(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -760,9 +842,8 @@ async def owner_remove_prompt(bot, cb):
         LOGGER.exception("Owner remove prompt handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_sudo_list$") & filters.private)
-async def owner_sudo_list(bot, cb):
-    """Display active sudo users."""
+
+async def _owner_sudo_list(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -779,9 +860,8 @@ async def owner_sudo_list(bot, cb):
         LOGGER.exception("Owner sudo list handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_manage_sessions$") & filters.private)
-async def owner_manage_sessions(bot, cb):
-    """Display session management list."""
+
+async def _owner_manage_sessions(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -794,15 +874,14 @@ async def owner_manage_sessions(bot, cb):
             text += f"👤 {s['name']} ({s['phone']})\n"
             callback_data = _build_remove_session_callback(s["phone"])
             kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
-        kb.append([types.InlineKeyboardButton("🔙 Back", callback_data="owner_panel")])
+        kb.append([types.InlineKeyboardButton("🔙 Back", callback_data=_cb("owner:panel"))])
         await _safe_edit(cb, text, reply_markup=types.InlineKeyboardMarkup(kb))
     except Exception:
         LOGGER.exception("Owner manage sessions handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_set_log$") & filters.private)
-async def owner_set_log_cb(bot, cb):
-    """Set log group from callback."""
+
+async def _owner_set_log_cb(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -818,9 +897,8 @@ async def owner_set_log_cb(bot, cb):
         LOGGER.exception("Owner set log handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
-@bot.on_callback_query(filters.regex(r"^owner_set_session$") & filters.private)
-async def owner_set_session_cb(bot, cb):
-    """Set session validation group from callback."""
+
+async def _owner_set_session_cb(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -831,21 +909,20 @@ async def owner_set_session_cb(bot, cb):
             "⚠️ Use /set_session inside the session manager group to configure session intake.",
             reply_markup=_owner_panel_keyboard(),
         )
-        return
     except Exception:
         LOGGER.exception("Owner set session handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
 
-@bot.on_callback_query(filters.regex(r"^help_verify_(on|off)$") & filters.private)
-async def help_verify_toggle(bot, cb):
-    """Handle verify toggle from help buttons."""
+async def _help_verify_toggle(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
-        mode = cb.matches[0].group(1)
+        mode = "on"
+        if cb.data.endswith("off"):
+            mode = "off"
         await update_setting("verify_enabled", mode == "on")
         await _safe_edit(cb, f"✅ Verification mode set to {mode}.", reply_markup=_help_keyboard())
     except Exception:
@@ -853,9 +930,7 @@ async def help_verify_toggle(bot, cb):
         await _safe_edit(cb, "❌ Failed to update verification mode.")
 
 
-@bot.on_callback_query(filters.regex(r"^help_manage$") & filters.private)
-async def help_manage_sessions(bot, cb):
-    """Shortcut to manage sessions from help buttons."""
+async def _help_manage_sessions(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -868,15 +943,14 @@ async def help_manage_sessions(bot, cb):
             text += f"👤 {s['name']} ({s['phone']})\n"
             callback_data = _build_remove_session_callback(s["phone"])
             kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
-        kb.append([types.InlineKeyboardButton("🔙 Back", callback_data="home")])
+        kb.append([types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))])
         await _safe_edit(cb, text, reply_markup=types.InlineKeyboardMarkup(kb))
     except Exception:
         LOGGER.exception("Help manage sessions failed.")
         await _safe_edit(cb, "❌ Failed to load sessions.")
 
-@bot.on_message(command_filter("set_log") & (filters.private | GROUP_FILTER))
-async def set_log_group(bot, message):
-    """Set log group with /set_log."""
+
+async def _set_log_group(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -887,9 +961,8 @@ async def set_log_group(bot, message):
         LOGGER.exception("Set log command failed.")
         await _safe_reply(message, "❌ Failed to set log group.")
 
-@bot.on_message(command_filter("set_session") & (filters.private | GROUP_FILTER))
-async def set_session_group(bot, message):
-    """Set session group with /set_session."""
+
+async def _set_session_group(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -903,9 +976,8 @@ async def set_session_group(bot, message):
         LOGGER.exception("Set session command failed.")
         await _safe_reply(message, "❌ Failed to set session group.")
 
-@bot.on_message(command_filter("manage") & (filters.private | GROUP_FILTER))
-async def manage_sessions(bot, message):
-    """List active sessions via /manage."""
+
+async def _manage_sessions(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -918,15 +990,14 @@ async def manage_sessions(bot, message):
             callback_data = _build_remove_session_callback(s["phone"])
             kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
 
-        kb.append([types.InlineKeyboardButton("🆘 Help", callback_data="home")])
+        kb.append([types.InlineKeyboardButton("🆘 Help", callback_data=_cb("home"))])
         await _safe_reply(message, text, reply_markup=types.InlineKeyboardMarkup(kb))
     except Exception:
         LOGGER.exception("Manage sessions command failed.")
         await _safe_reply(message, "❌ Failed to load sessions.")
 
-@bot.on_callback_query(filters.regex(r"^rem_(.+)$"))
-async def remove_session(bot, cb):
-    """Remove a session from callback action."""
+
+async def _remove_session(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
@@ -940,8 +1011,8 @@ async def remove_session(bot, cb):
         LOGGER.exception("Remove session callback failed.")
         await _safe_edit(cb, "❌ Failed to remove session.")
 
-@bot.on_message(filters.text & filters.private)
-async def handle_text_messages(bot, message):
+
+async def _handle_text_messages(client: Client, message: types.Message) -> None:
     try:
         if not message.from_user or not message.text:
             return
@@ -951,7 +1022,7 @@ async def handle_text_messages(bot, message):
         if state in {"owner_add_sudo", "owner_remove_sudo"}:
             if message.from_user.id not in Config.OWNERS:
                 return
-            user_id, username = await _resolve_user_id(bot, message.text)
+            user_id, username = await _resolve_user_id(client, message.text)
             if user_id is None and username is None:
                 await _safe_reply(message, "❌ Please send a valid user ID or @username.")
                 return
@@ -972,7 +1043,7 @@ async def handle_text_messages(bot, message):
                 await _safe_reply(message, "❌ You are not authorized. Send payment proof to get access.")
                 _clear_love_state(message.from_user.id)
                 return
-            target_id, target_username = await _resolve_user_id(bot, message.text)
+            target_id, target_username = await _resolve_user_id(client, message.text)
             if target_id is None and target_username is None:
                 await _safe_reply(message, "❌ Failed to resolve user.")
                 return
@@ -994,9 +1065,8 @@ async def handle_text_messages(bot, message):
         LOGGER.exception("Handle text handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
 
-@bot.on_message(command_filter("preban") & (filters.private | GROUP_FILTER))
-async def preban_user(bot, message):
-    """Queue a pre-ban request via /preban."""
+
+async def _preban_user(client: Client, message: types.Message) -> None:
     try:
         if await _reject_anonymous_command(message):
             return
@@ -1010,7 +1080,7 @@ async def preban_user(bot, message):
             await _safe_reply(message, "Usage: /preban <user_id or @username>")
             return
 
-        target_id, target_username = await _resolve_user_id(bot, message.command[1])
+        target_id, target_username = await _resolve_user_id(client, message.command[1])
 
         if target_id is None and target_username is None:
             await _safe_reply(message, "❌ Failed to resolve user.")
@@ -1028,9 +1098,7 @@ async def preban_user(bot, message):
         await _safe_reply(message, "❌ Failed to queue pre-ban request.")
 
 
-@bot.on_message(command_filter("status") & (filters.private | GROUP_FILTER))
-async def status_command(bot, message):
-    """Show queue status with /status."""
+async def _status_command(client: Client, message: types.Message) -> None:
     try:
         if await _reject_anonymous_command(message):
             return
@@ -1047,9 +1115,7 @@ async def status_command(bot, message):
         await _safe_reply(message, "❌ Failed to get queue status.")
 
 
-@bot.on_message(command_filter("health") & (filters.private | GROUP_FILTER))
-async def health_command(bot, message):
-    """Show health snapshot for owners."""
+async def _health_command(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -1071,9 +1137,7 @@ async def health_command(bot, message):
         await _safe_reply(message, "❌ Failed to collect health status.")
 
 
-@bot.on_message(command_filter("addsession") & (filters.private | GROUP_FILTER))
-async def add_session_command(bot, message):
-    """Add a session string to the database."""
+async def _add_session_command(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -1113,9 +1177,7 @@ async def add_session_command(bot, message):
         await _safe_reply(message, "❌ Failed to add session.")
 
 
-@bot.on_message(command_filter("addsudo") & (filters.private | GROUP_FILTER))
-async def add_sudo_command(bot, message):
-    """Grant sudo access to a user."""
+async def _add_sudo_command(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -1123,7 +1185,7 @@ async def add_sudo_command(bot, message):
         if len(message.command) < 2:
             await _safe_reply(message, "Usage: /addsudo <user_id or @username>")
             return
-        user_id, username = await _resolve_user_id(bot, message.command[1])
+        user_id, username = await _resolve_user_id(client, message.command[1])
         if user_id is None:
             await _safe_reply(message, f"❌ Failed to resolve {username or 'user'}.")
             return
@@ -1134,9 +1196,7 @@ async def add_sudo_command(bot, message):
         await _safe_reply(message, "❌ Failed to add sudo user.")
 
 
-@bot.on_message(command_filter("remsudo") & (filters.private | GROUP_FILTER))
-async def remove_sudo_command(bot, message):
-    """Revoke sudo access from a user."""
+async def _remove_sudo_command(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -1144,7 +1204,7 @@ async def remove_sudo_command(bot, message):
         if len(message.command) < 2:
             await _safe_reply(message, "Usage: /remsudo <user_id or @username>")
             return
-        user_id, username = await _resolve_user_id(bot, message.command[1])
+        user_id, username = await _resolve_user_id(client, message.command[1])
         if user_id is None:
             await _safe_reply(message, f"❌ Failed to resolve {username or 'user'}.")
             return
@@ -1155,9 +1215,7 @@ async def remove_sudo_command(bot, message):
         await _safe_reply(message, "❌ Failed to remove sudo user.")
 
 
-@bot.on_message(command_filter("verify") & (filters.private | GROUP_FILTER))
-async def set_verify_mode(bot, message):
-    """Toggle verify mode on or off."""
+async def _set_verify_mode(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -1176,9 +1234,7 @@ async def set_verify_mode(bot, message):
         await _safe_reply(message, "❌ Failed to update verification mode.")
 
 
-@bot.on_message(command_filter("verify_delay") & (filters.private | GROUP_FILTER))
-async def set_verify_delay(bot, message):
-    """Set verification delay for bans."""
+async def _set_verify_delay(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -1201,9 +1257,7 @@ async def set_verify_delay(bot, message):
         await _safe_reply(message, "❌ Failed to update verification delay.")
 
 
-@bot.on_message(command_filter("set") & (filters.private | GROUP_FILTER))
-async def set_command(bot, message):
-    """Update configurable defaults via /set."""
+async def _set_command(client: Client, message: types.Message) -> None:
     try:
         if not await _require_owner(message):
             return
@@ -1248,9 +1302,24 @@ async def set_command(bot, message):
         await _safe_reply(message, "❌ Failed to update settings.")
 
 
-@bot.on_message(filters.text & (filters.private | GROUP_FILTER), group=100)
-async def unknown_command(bot, message):
-    """Reply to unknown commands with guidance."""
+# -----------------------------
+# Fallbacks
+# -----------------------------
+
+
+def register_fallbacks(app: Client) -> None:
+    LOGGER.info("Registering fallback handlers.")
+    app.add_handler(
+        MessageHandler(_unknown_command, filters.text & (filters.private | GROUP_FILTER)),
+        group=100,
+    )
+    app.add_handler(
+        MessageHandler(_fallback_command_response, filters.text & (filters.private | GROUP_FILTER)),
+        group=200,
+    )
+
+
+async def _unknown_command(client: Client, message: types.Message) -> None:
     try:
         if not message.text:
             return
@@ -1262,17 +1331,14 @@ async def unknown_command(bot, message):
         _log_command_invocation(message, f"unknown:{command}")
         await _safe_reply(
             message,
-            "❓ Unknown command.\n"
-            "Use /help to see available commands.",
+            "❓ Unknown command.\nUse /help to see available commands.",
         )
     except Exception:
         LOGGER.exception("Unknown command handler failed.")
         await _safe_reply(message, "❌ Failed to process command.")
 
 
-@bot.on_message(filters.text & (filters.private | GROUP_FILTER), group=200)
-async def fallback_command_response(bot, message):
-    """Ensure commands always receive a response if other handlers fail."""
+async def _fallback_command_response(client: Client, message: types.Message) -> None:
     try:
         if not message.text or getattr(message, "_buta_replied", False):
             return
@@ -1290,6 +1356,3 @@ async def fallback_command_response(bot, message):
     except Exception:
         LOGGER.exception("Fallback command handler failed.")
         await _safe_reply(message, "❌ Failed to process command.")
-
-
-Fix this entire code priperly
