@@ -9,8 +9,8 @@ from __future__ import annotations
 #   buta:owner:manage_sessions, buta:owner:set_log, buta:owner:set_session,
 #   buta:payment:info, buta:payment:how, buta:session:remove:* (registered in
 #   register_ui_and_commands).
-# - Bugs fixed: private-chat detection (enums.ChatType.PRIVATE), callback mismatches,
-#   and shared command/callback flows for owner actions.
+# - Fixes include: callback private checks via cq.message.chat, filters.create signatures,
+#   chat_id normalization for log/session groups, and stable /start UI flows.
 
 import asyncio
 import logging
@@ -65,11 +65,29 @@ if hasattr(filters, "supergroup"):
     GROUP_FILTER |= filters.supergroup
 
 
-def _message_private_filter(_: Client, message: types.Message) -> bool:
-    return bool(getattr(message, "chat", None) and message.chat.type == enums.ChatType.PRIVATE)
+_PRIVATE_CHAT_TYPES = {enums.ChatType.PRIVATE}
+if hasattr(enums.ChatType, "BOT"):
+    _PRIVATE_CHAT_TYPES.add(enums.ChatType.BOT)
 
 
-def _message_group_filter(_: Client, message: types.Message) -> bool:
+def is_private_message(message: types.Message) -> bool:
+    return bool(getattr(message, "chat", None) and message.chat.type in _PRIVATE_CHAT_TYPES)
+
+
+def is_private_callback(cb: types.CallbackQuery) -> bool:
+    return bool(
+        cb
+        and cb.message
+        and cb.message.chat
+        and cb.message.chat.type in _PRIVATE_CHAT_TYPES
+    )
+
+
+def _message_private_filter(_: filters.Filter, __: Client, message: types.Message) -> bool:
+    return is_private_message(message)
+
+
+def _message_group_filter(_: filters.Filter, __: Client, message: types.Message) -> bool:
     return bool(
         getattr(message, "chat", None)
         and message.chat.type in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}
@@ -493,8 +511,8 @@ def _dm_only_message() -> str:
     return "⚠️ This feature is available in private chat. Please DM the bot."
 
 
-def _callback_private_filter(_: Client, cb: types.CallbackQuery) -> bool:
-    return bool(cb.message and cb.message.chat and cb.message.chat.type == enums.ChatType.PRIVATE)
+def _callback_private_filter(_: filters.Filter, __: Client, cb: types.CallbackQuery) -> bool:
+    return is_private_callback(cb)
 
 
 PRIVATE_CALLBACK_FILTER = filters.create(_callback_private_filter)
@@ -843,7 +861,10 @@ def register_ui_and_commands(app: Client) -> None:
     )
 
     app.add_handler(
-        CallbackQueryHandler(_remove_session, filters.regex(r"^buta:session:remove:(.+)$")),
+        CallbackQueryHandler(
+            _remove_session,
+            filters.regex(r"^buta:session:remove:(.+)$") & PRIVATE_CALLBACK_FILTER,
+        ),
         group=3,
     )
 
@@ -901,7 +922,7 @@ async def _help_command(client: Client, message: types.Message) -> None:
         _log_command_invocation(message, "help")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
-        show_keyboard = message.chat.type == enums.ChatType.PRIVATE
+        show_keyboard = is_private_message(message)
         if not has_sudo:
             payment_list = await _build_payment_list_text()
             text = (
@@ -927,7 +948,7 @@ async def _start_command(client: Client, message: types.Message) -> None:
         _log_command_invocation(message, "start")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
-        show_keyboard = message.chat.type == enums.ChatType.PRIVATE
+        show_keyboard = is_private_message(message)
         if not show_keyboard:
             await _safe_reply(message, "👋 **Welcome!**\n\nPlease DM me for full instructions.")
             return
