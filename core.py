@@ -333,6 +333,16 @@ async def _safe_send(bot: Client, chat_id: int, text: str) -> None:
         LOGGER.exception("Failed to send message to chat_id=%s.", chat_id)
 
 
+async def _safe_edit_message(bot: Client, chat_id: int, message_id: int, text: str) -> bool:
+    """Safely edit a message in a chat."""
+    try:
+        await bot.edit_message_text(chat_id, message_id, text)
+        return True
+    except Exception:
+        LOGGER.exception("Failed to edit message chat_id=%s message_id=%s.", chat_id, message_id)
+        return False
+
+
 async def _process_one_session(
     session_row: Dict[str, Any],
     target_id: Optional[int],
@@ -485,6 +495,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
         got_item = False
         target_label = "unknown"
         requester_id = None
+        notify_chat_id = None
+        notify_message_id = None
         start_time = time.time()
         success = False
         try:
@@ -494,6 +506,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 request_id = target_info.get("request_id")
                 if request_id:
                     signal_request_started(str(request_id))
+                notify_chat_id = target_info.get("notify_chat_id")
+                notify_message_id = target_info.get("notify_message_id")
 
             # Normalize target
             target_id: Optional[int] = None
@@ -612,10 +626,26 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 f"\nSessions Used: {session_count}"
                 f"\nAttempts: {attempt_count}"
                 f"\nBans Issued: {ban_count}"
+                f"\nFailed: {max(0, attempt_count - ban_count)}"
                 f"\nSkipped: {skip_count}"
                 f"\nVerified Bans: {success_count}"
                 f"{metrics_block}",
             )
+            if notify_chat_id and notify_message_id:
+                await _safe_edit_message(
+                    bot,
+                    notify_chat_id,
+                    int(notify_message_id),
+                    "✅ **Send Love Complete**"
+                    f"\nTarget: `{target_label}`"
+                    f"\nSessions Used: {session_count}"
+                    f"\nAttempts: {attempt_count}"
+                    f"\nSuccess: {ban_count}"
+                    f"\nFailed: {max(0, attempt_count - ban_count)}"
+                    f"\nSkipped: {skip_count}"
+                    f"\nVerified Bans: {success_count}"
+                    f"{metrics_block}",
+                )
             success = True
         except asyncio.CancelledError:
             raise
@@ -627,6 +657,13 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             )
             if requester_id is not None:
                 await _safe_send(bot, requester_id, failure_message)
+            if notify_chat_id and notify_message_id:
+                await _safe_edit_message(
+                    bot,
+                    notify_chat_id,
+                    int(notify_message_id),
+                    f"{failure_message}\nTarget: `{target_label}`",
+                )
             try:
                 conf = await get_settings()
                 log_group = conf.get("log_group")
