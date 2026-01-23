@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+# REPORT:
+# - Sudo /start shows a Control Panel with 💌 Send Love and ❓ Help only.
+# - Owner /start goes directly to a Control Panel with ➕ Add Sudo, 📥 Manage Sessions,
+#   📝 Set Log Group, 🔐 Set Session Intake Group, 💌 Send Love, and ❓ Help (two per row).
+# - Normal users /start shows payment-only buttons (Payment Plans + Send Payment Proof).
+# - Callbacks used: buta:help, buta:back, buta:love:send, buta:owner:add_sudo,
+#   buta:owner:manage_sessions, buta:owner:set_log, buta:owner:set_session,
+#   buta:payment:info, buta:payment:how, buta:session:remove:* (registered in
+#   register_ui_and_commands).
+
 import asyncio
 import logging
 import time
@@ -404,109 +414,51 @@ def _cb(action: str, *parts: str) -> str:
     return f"{CALLBACK_PREFIX}{action}"
 
 
-def _start_keyboard(is_owner: bool, has_sudo: bool) -> types.InlineKeyboardMarkup:
-    if has_sudo and not is_owner:
-        return types.InlineKeyboardMarkup(
-            [[types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send"))]]
-        )
-    if not has_sudo and not is_owner:
-        return types.InlineKeyboardMarkup(
-            [
-                [types.InlineKeyboardButton("💳 Payment Plans", callback_data=_cb("payment:info"))],
-                [types.InlineKeyboardButton("📤 Send Payment Proof", callback_data=_cb("payment:how"))],
-                [types.InlineKeyboardButton("🧭 Guide", callback_data=_cb("start:help"))],
-            ]
-        )
-    rows = [
-        [
-            types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send")),
-            types.InlineKeyboardButton("🧭 Guide", callback_data=_cb("start:help")),
-            types.InlineKeyboardButton("🔁 Status", callback_data=_cb("start:ping")),
-        ]
-    ]
-    if is_owner:
-        rows.extend(
-            [
-                [types.InlineKeyboardButton("👑 Owner Panel", callback_data=_cb("owner:panel"))],
-                [
-                    types.InlineKeyboardButton(
-                        "📥 Manage Sessions", callback_data=_cb("owner:manage_sessions")
-                    ),
-                    types.InlineKeyboardButton("📄 Sudo List", callback_data=_cb("owner:sudo_list")),
-                ],
-                [
-                    types.InlineKeyboardButton("📝 Set Log Group", callback_data=_cb("owner:set_log")),
-                    types.InlineKeyboardButton(
-                        "🔐 Set Session Group", callback_data=_cb("owner:set_session")
-                    ),
-                ],
-            ]
-        )
-    return types.InlineKeyboardMarkup(rows)
-
-
-def _sudo_panel_keyboard() -> types.InlineKeyboardMarkup:
+def _sudo_control_panel_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(
         [
             [types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send"))],
-            [types.InlineKeyboardButton("⬅️ Back", callback_data=_cb("home"))],
+            [types.InlineKeyboardButton("❓ Help", callback_data=_cb("help"))],
         ]
     )
 
 
-def _owner_panel_keyboard() -> types.InlineKeyboardMarkup:
+def _owner_control_panel_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(
         [
             [
-                types.InlineKeyboardButton("➕ Add Session", callback_data=_cb("owner:add_session")),
-                types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send")),
-            ],
-            [
                 types.InlineKeyboardButton("➕ Add Sudo", callback_data=_cb("owner:add_sudo")),
-                types.InlineKeyboardButton("➖ Remove Sudo", callback_data=_cb("owner:remove_sudo")),
-            ],
-            [
                 types.InlineKeyboardButton(
                     "📥 Manage Sessions", callback_data=_cb("owner:manage_sessions")
                 ),
             ],
             [
-                types.InlineKeyboardButton("📝 Set Log Group", callback_data=_cb("owner:set_log")),
                 types.InlineKeyboardButton(
-                    "🔐 Set Session Group", callback_data=_cb("owner:set_session")
+                    "📝 Set Log Group", callback_data=_cb("owner:set_log")
+                ),
+                types.InlineKeyboardButton(
+                    "🔐 Set Session Intake Group", callback_data=_cb("owner:set_session")
                 ),
             ],
-            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))],
+            [
+                types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send")),
+                types.InlineKeyboardButton("❓ Help", callback_data=_cb("help")),
+            ],
         ]
     )
 
 
-def _payment_keyboard() -> types.InlineKeyboardMarkup:
+def _user_payment_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(
         [
+            [
+                types.InlineKeyboardButton("💳 Payment Plans", callback_data=_cb("payment:info")),
+            ],
             [
                 types.InlineKeyboardButton(
                     "📤 Send Payment Proof", callback_data=_cb("payment:how")
                 )
             ],
-            [types.InlineKeyboardButton("⬅️ Back", callback_data=_cb("home"))],
-        ]
-    )
-
-
-def _owner_action_keyboard(action: str) -> types.InlineKeyboardMarkup:
-    if action == "owner:add_session":
-        label = "📥 Provide Session String"
-    else:
-        label = "🆔 Provide User ID/Username"
-    return types.InlineKeyboardMarkup(
-        [
-            [
-                types.InlineKeyboardButton(
-                    label, callback_data=_cb(f"{action}:prompt")
-                )
-            ],
-            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("owner:panel"))],
         ]
     )
 
@@ -514,18 +466,29 @@ def _owner_action_keyboard(action: str) -> types.InlineKeyboardMarkup:
 def _help_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(
         [
-            [
-                types.InlineKeyboardButton("✅ Verify On", callback_data=_cb("help:verify:on")),
-                types.InlineKeyboardButton("🛑 Verify Off", callback_data=_cb("help:verify:off")),
-            ],
-            [types.InlineKeyboardButton("📥 Manage Sessions", callback_data=_cb("help:manage"))],
-            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))],
+            [types.InlineKeyboardButton("⬅️ Back", callback_data=_cb("back"))],
         ]
     )
 
 
 def _dm_only_message() -> str:
     return "⚠️ This feature is available in private chat. Please DM the bot."
+
+
+def _get_control_panel_keyboard(is_owner: bool, has_sudo: bool) -> types.InlineKeyboardMarkup:
+    if is_owner:
+        return _owner_control_panel_keyboard()
+    if has_sudo:
+        return _sudo_control_panel_keyboard()
+    return _user_payment_keyboard()
+
+
+def _build_control_panel_text(is_owner: bool, has_sudo: bool) -> str:
+    if is_owner:
+        return "🧭 **Control Panel**\n\nOwner tools are ready. Choose an action below."
+    if has_sudo:
+        return "🧭 **Control Panel**\n\nChoose an action below."
+    return "💳 **Payment Required**\n\nUse the payment options below to unlock Send Love access."
 
 
 def _build_remove_session_callback(phone: str) -> str:
@@ -544,32 +507,35 @@ def _resolve_remove_session_target(token: str) -> str:
 
 
 def _build_help_text(is_owner: bool, has_sudo: bool) -> str:
-    text = (
-        "🆘 **Help Menu**\n\n"
+    if not is_owner and not has_sudo:
+        return (
+            "💳 **Payment Required**\n\n"
+            "Use /start to view payment plans and send payment proof."
+        )
+    return (
+        "🆘 **Help**\n\n"
         "Common commands:\n"
         "• /ping - Check if bot is alive\n"
         "• /preban <user_id or @username> - Queue a pre-ban\n"
         "• /status - Queue status\n"
         "• /cancel - Cancel active Send Love flow\n\n"
+        "Send Love flow:\n"
+        "1) Tap 💌 Send Love\n"
+        "2) Send target username (e.g. @user) or user_id\n"
+        "3) Wait for queue updates and results"
     )
-    if is_owner:
-        text += (
-            "Owner commands:\n"
-            "• /addsession <session_string>\n"
-            "• /addsudo <user_id or @username>\n"
-            "• /remsudo <user_id or @username>\n"
-            "• /verify <on|off>\n"
-            "• /verify_delay <seconds>\n"
-            "• /manage - List sessions\n"
-            "• /set_log - Set log group\n"
-            "• /set_session - Set session intake group\n"
-            "• /set <key> <value> - Configure defaults\n"
-        )
-    elif has_sudo:
-        text += "You have sudo access. Use **Send Love** to submit targets."
-    else:
-        text += "You do not have sudo access yet. Submit payment proof to gain access."
-    return text
+
+
+async def _build_manage_sessions_view() -> tuple[str, types.InlineKeyboardMarkup]:
+    all_s = await get_active_sessions()
+    text = f"📑 **Active Sessions ({len(all_s)}):**\n\n"
+    kb = []
+    for s in all_s:
+        text += f"👤 {s['name']} ({s['phone']})\n"
+        callback_data = _build_remove_session_callback(s["phone"])
+        kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
+    kb.append([types.InlineKeyboardButton("⬅️ Back", callback_data=_cb("back"))])
+    return text, types.InlineKeyboardMarkup(kb)
 
 
 async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
@@ -583,7 +549,7 @@ async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
         await _safe_edit(
             cb,
             "❌ No session available for banning. Ask the admin to add one via /set_session in the session group.",
-            reply_markup=_start_keyboard(is_owner, has_sudo),
+            reply_markup=_get_control_panel_keyboard(is_owner, has_sudo),
         )
         return False
     return True
@@ -698,35 +664,56 @@ def register_ui_and_commands(app: Client) -> None:
         group=3,
     )
 
-    app.add_handler(CallbackQueryHandler(_start_help, filters.regex(r"^(?:buta:start:help|start_help)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_start_ping, filters.regex(r"^(?:buta:start:ping|start_ping)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_go_home, filters.regex(r"^(?:buta:home|home)$") & filters.private), group=3)
+    app.add_handler(
+        CallbackQueryHandler(_help_callback, filters.regex(r"^buta:help$") & filters.private),
+        group=3,
+    )
+    app.add_handler(
+        CallbackQueryHandler(_back_to_panel, filters.regex(r"^buta:back$") & filters.private),
+        group=3,
+    )
 
-    app.add_handler(CallbackQueryHandler(_payment_info, filters.regex(r"^(?:buta:payment:info|payment_info)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_payment_how, filters.regex(r"^(?:buta:payment:how|payment_how)$") & filters.private), group=3)
+    app.add_handler(
+        CallbackQueryHandler(_payment_info, filters.regex(r"^buta:payment:info$") & filters.private),
+        group=3,
+    )
+    app.add_handler(
+        CallbackQueryHandler(_payment_how, filters.regex(r"^buta:payment:how$") & filters.private),
+        group=3,
+    )
 
-    app.add_handler(CallbackQueryHandler(_love_send, filters.regex(r"^(?:buta:love:send|love_send)$") & filters.private), group=3)
+    app.add_handler(
+        CallbackQueryHandler(_love_send, filters.regex(r"^buta:love:send$") & filters.private),
+        group=3,
+    )
 
-    app.add_handler(CallbackQueryHandler(_owner_panel, filters.regex(r"^(?:buta:owner:panel|owner_panel)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_add_session, filters.regex(r"^(?:buta:owner:add_session|owner_add_session)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_add_sudo, filters.regex(r"^(?:buta:owner:add_sudo|owner_add_sudo)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_remove_sudo, filters.regex(r"^(?:buta:owner:remove_sudo|owner_remove_sudo)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_add_session_prompt, filters.regex(r"^(?:buta:owner:add_session:prompt|owner_add_session_prompt)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_add_prompt, filters.regex(r"^(?:buta:owner:add_sudo:prompt|owner_add_sudo_prompt)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_remove_prompt, filters.regex(r"^(?:buta:owner:remove_sudo:prompt|owner_remove_sudo_prompt)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_sudo_list, filters.regex(r"^(?:buta:owner:sudo_list|owner_sudo_list)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_manage_sessions, filters.regex(r"^(?:buta:owner:manage_sessions|owner_manage_sessions)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_set_log_cb, filters.regex(r"^(?:buta:owner:set_log|owner_set_log)$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_owner_set_session_cb, filters.regex(r"^(?:buta:owner:set_session|owner_set_session)$") & filters.private), group=3)
-
-    app.add_handler(CallbackQueryHandler(_help_verify_toggle, filters.regex(r"^(?:buta:help:verify:(?:on|off)|help_verify_(?:on|off))$") & filters.private), group=3)
-    app.add_handler(CallbackQueryHandler(_help_manage_sessions, filters.regex(r"^(?:buta:help:manage|help_manage)$") & filters.private), group=3)
+    app.add_handler(
+        CallbackQueryHandler(_owner_add_sudo, filters.regex(r"^buta:owner:add_sudo$") & filters.private),
+        group=3,
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            _owner_manage_sessions, filters.regex(r"^buta:owner:manage_sessions$") & filters.private
+        ),
+        group=3,
+    )
+    app.add_handler(
+        CallbackQueryHandler(_owner_set_log_cb, filters.regex(r"^buta:owner:set_log$") & filters.private),
+        group=3,
+    )
+    app.add_handler(
+        CallbackQueryHandler(_owner_set_session_cb, filters.regex(r"^buta:owner:set_session$") & filters.private),
+        group=3,
+    )
 
     app.add_handler(MessageHandler(_set_log_group, command_filter("set_log") & (filters.private | GROUP_FILTER)), group=3)
     app.add_handler(MessageHandler(_set_session_group, command_filter("set_session") & (filters.private | GROUP_FILTER)), group=3)
     app.add_handler(MessageHandler(_manage_sessions, command_filter("manage") & (filters.private | GROUP_FILTER)), group=3)
 
-    app.add_handler(CallbackQueryHandler(_remove_session, filters.regex(r"^(?:buta:session:remove:|rem_)(.+)$")), group=3)
+    app.add_handler(
+        CallbackQueryHandler(_remove_session, filters.regex(r"^buta:session:remove:(.+)$")),
+        group=3,
+    )
 
     app.add_handler(MessageHandler(_handle_text_messages, filters.text & filters.private), group=3)
     app.add_handler(MessageHandler(_preban_user, command_filter("preban") & (filters.private | GROUP_FILTER)), group=3)
@@ -780,8 +767,18 @@ async def _help_command(client: Client, message: types.Message) -> None:
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
         show_keyboard = message.chat.type == "private"
-        text = _build_help_text(is_owner, has_sudo)
-        markup = _help_keyboard() if is_owner and show_keyboard else None
+        if not has_sudo:
+            payment_list = await _build_payment_list_text()
+            text = (
+                "💳 **Payment Required**\n\n"
+                "Unlock **Send Love** access with a payment plan:\n\n"
+                f"{payment_list}\n\n"
+                "After payment, tap **Send Payment Proof** to upload your screenshot."
+            )
+            markup = _user_payment_keyboard() if show_keyboard else None
+        else:
+            text = _build_help_text(is_owner, has_sudo)
+            markup = _help_keyboard() if show_keyboard else None
         await _safe_reply(message, text, reply_markup=markup)
     except Exception:
         LOGGER.exception("Help command failed.")
@@ -796,28 +793,23 @@ async def _start_command(client: Client, message: types.Message) -> None:
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
         show_keyboard = message.chat.type == "private"
-        if show_keyboard:
-            intro = "👋 **Welcome!**\n\nUse the buttons below to continue.\n"
-        else:
-            intro = "👋 **Welcome!**\n\nPlease DM me for full instructions."
-        if is_owner:
-            title = "👑 **Owner Panel**"
-            body = "Welcome, Owner! Use the panel below to manage sudo users, sessions, and log groups."
-        elif has_sudo:
-            title = "💌 **Sudo Access Granted**"
-            body = "Tap **Send Love** to start a pre-ban request with a username."
-        else:
-            title = "💳 **Payment Required**"
+        if not show_keyboard:
+            await _safe_reply(message, "👋 **Welcome!**\n\nPlease DM me for full instructions.")
+            return
+        if not has_sudo:
             payment_list = await _build_payment_list_text()
-            body = (
+            text = (
+                "💳 **Payment Required**\n\n"
                 "Unlock **Send Love** access with a payment plan:\n\n"
                 f"{payment_list}\n\n"
                 "After payment, tap **Send Payment Proof** to upload your screenshot."
             )
+            await _safe_reply(message, text, reply_markup=_user_payment_keyboard())
+            return
         await _safe_reply(
             message,
-            f"{intro}\n{title}\n\n{body}",
-            reply_markup=_start_keyboard(is_owner, has_sudo) if show_keyboard else None,
+            _build_control_panel_text(is_owner, has_sudo),
+            reply_markup=_get_control_panel_keyboard(is_owner, has_sudo),
         )
     except Exception:
         LOGGER.exception("Start handler failed.")
@@ -838,67 +830,55 @@ async def _cancel_command(client: Client, message: types.Message) -> None:
         await _safe_reply(message, "❌ Failed to cancel. Please try again.")
 
 
-async def _start_help(client: Client, cb: types.CallbackQuery) -> None:
+async def _help_callback(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user:
             return
-        await _answer_cb(cb)
         is_owner = cb.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(cb.from_user.id)
-        text = _build_help_text(is_owner, has_sudo)
-        markup = _help_keyboard() if is_owner else _start_keyboard(is_owner, has_sudo)
-        await _safe_edit(cb, text, reply_markup=markup)
-    except Exception:
-        LOGGER.exception("Start help callback failed.")
-        await _safe_edit(cb, "❌ Failed to load help information.")
-
-
-async def _start_ping(client: Client, cb: types.CallbackQuery) -> None:
-    try:
-        if not cb.from_user:
-            return
-        await _answer_cb(cb)
-        session_count = await _get_session_count()
-        is_owner = cb.from_user.id in Config.OWNERS
-        has_sudo = is_owner or await has_access(cb.from_user.id)
-        await _safe_edit(
-            cb,
-            f"✅ Bot is active. Sessions loaded: {session_count}",
-            reply_markup=_start_keyboard(is_owner, has_sudo),
-        )
-    except Exception:
-        LOGGER.exception("Start ping callback failed.")
-        await _safe_edit(cb, "❌ Failed to respond to ping.")
-
-
-async def _go_home(client: Client, cb: types.CallbackQuery) -> None:
-    try:
-        if not cb.from_user:
-            return
-        await _answer_cb(cb)
-        is_owner = cb.from_user.id in Config.OWNERS
-        has_sudo = is_owner or await has_access(cb.from_user.id)
-        if is_owner:
-            title = "👑 **Owner Panel**"
-            body = "Welcome, Owner! Use the panel below to manage sudo users, sessions, and log groups."
-        elif has_sudo:
-            title = "💌 **Sudo Access Granted**"
-            body = "Tap **Send Love** to start a pre-ban request with a username."
-        else:
-            title = "💳 **Payment Required**"
+        if not has_sudo:
+            await _answer_cb(cb, "Payment required.", show_alert=True)
             payment_list = await _build_payment_list_text()
-            body = (
+            text = (
+                "💳 **Payment Required**\n\n"
                 "Unlock **Send Love** access with a payment plan:\n\n"
                 f"{payment_list}\n\n"
                 "After payment, tap **Send Payment Proof** to upload your screenshot."
             )
+            await _safe_edit(cb, text, reply_markup=_user_payment_keyboard())
+            return
+        await _answer_cb(cb)
+        text = _build_help_text(is_owner, has_sudo)
+        await _safe_edit(cb, text, reply_markup=_help_keyboard())
+    except Exception:
+        LOGGER.exception("Help callback failed.")
+        await _safe_edit(cb, "❌ Failed to load help information.")
+
+
+async def _back_to_panel(client: Client, cb: types.CallbackQuery) -> None:
+    try:
+        if not cb.from_user:
+            return
+        await _answer_cb(cb)
+        is_owner = cb.from_user.id in Config.OWNERS
+        has_sudo = is_owner or await has_access(cb.from_user.id)
+        if not has_sudo:
+            payment_list = await _build_payment_list_text()
+            text = (
+                "💳 **Payment Required**\n\n"
+                "Unlock **Send Love** access with a payment plan:\n\n"
+                f"{payment_list}\n\n"
+                "After payment, tap **Send Payment Proof** to upload your screenshot."
+            )
+            await _safe_edit(cb, text, reply_markup=_user_payment_keyboard())
+            return
         await _safe_edit(
             cb,
-            f"{title}\n\n{body}",
-            reply_markup=_start_keyboard(is_owner, has_sudo),
+            _build_control_panel_text(is_owner, has_sudo),
+            reply_markup=_get_control_panel_keyboard(is_owner, has_sudo),
         )
     except Exception:
-        LOGGER.exception("Home handler failed.")
+        LOGGER.exception("Back to panel handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
 
@@ -912,7 +892,7 @@ async def _payment_info(client: Client, cb: types.CallbackQuery) -> None:
             f"{payment_list}\n\n"
             "Please complete payment and send your screenshot in this chat.\n"
             "Tap **Send Payment Proof** after payment for approval.",
-            reply_markup=_payment_keyboard(),
+            reply_markup=_user_payment_keyboard(),
         )
     except Exception:
         LOGGER.exception("Payment info handler failed.")
@@ -926,7 +906,7 @@ async def _payment_how(client: Client, cb: types.CallbackQuery) -> None:
             cb,
             "📤 **Send Payment Proof**\n\n"
             "Upload your payment proof image here. We'll verify and activate your access.",
-            reply_markup=_payment_keyboard(),
+            reply_markup=_user_payment_keyboard(),
         )
     except Exception:
         LOGGER.exception("Payment how handler failed.")
@@ -946,7 +926,7 @@ async def _love_send(client: Client, cb: types.CallbackQuery) -> None:
                 "💳 **Payment Required**\n\n"
                 f"{payment_list}\n\n"
                 "Please complete payment to activate **Send Love** access.",
-                reply_markup=_payment_keyboard(),
+                reply_markup=_user_payment_keyboard(),
             )
             return
         if not await _validate_single_session_for_preban(cb):
@@ -956,9 +936,9 @@ async def _love_send(client: Client, cb: types.CallbackQuery) -> None:
         await _safe_edit(
             cb,
             "💌 **Send Love**\n\n"
-            "Please reply with the target **@username** or **user ID**.\n"
+            "Send target username (e.g. @user) or user_id.\n"
             "Use /cancel to stop this flow.",
-            reply_markup=_sudo_panel_keyboard(),
+            reply_markup=_get_control_panel_keyboard(is_owner, True),
         )
     except Exception:
         LOGGER.exception("Love send handler failed.")
@@ -973,9 +953,9 @@ async def _owner_panel(client: Client, cb: types.CallbackQuery) -> None:
         await _answer_cb(cb)
         await _safe_edit(
             cb,
-            "👑 **Owner Panel**\n\n"
-            "Manage sudo users, sessions, and bot settings below.",
-            reply_markup=_owner_panel_keyboard(),
+            "🧭 **Control Panel**\n\n"
+            "Owner tools are ready. Choose an action below.",
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner panel handler failed.")
@@ -988,11 +968,12 @@ async def _owner_add_session(client: Client, cb: types.CallbackQuery) -> None:
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
+        _set_love_state(cb.from_user.id, "owner_add_session")
         await _safe_edit(
             cb,
             "➕ **Add Session**\n\n"
-            "Tap the button below and send the new session string.",
-            reply_markup=_owner_action_keyboard("owner:add_session"),
+            "Send the new session string to add a session.",
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner add session handler failed.")
@@ -1009,7 +990,7 @@ async def _owner_add_session_prompt(client: Client, cb: types.CallbackQuery) -> 
         await _safe_edit(
             cb,
             "🆔 **Send the session string** to add a new session.",
-            reply_markup=_owner_panel_keyboard(),
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner add session prompt failed.")
@@ -1022,11 +1003,12 @@ async def _owner_add_sudo(client: Client, cb: types.CallbackQuery) -> None:
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
+        _set_love_state(cb.from_user.id, "owner_add_sudo")
         await _safe_edit(
             cb,
             "➕ **Add Sudo User**\n\n"
-            "Tap the button below and send the user ID or @username.",
-            reply_markup=_owner_action_keyboard("owner:add_sudo"),
+            "Send the user ID or @username to grant sudo access.",
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner add sudo handler failed.")
@@ -1039,11 +1021,12 @@ async def _owner_remove_sudo(client: Client, cb: types.CallbackQuery) -> None:
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
+        _set_love_state(cb.from_user.id, "owner_remove_sudo")
         await _safe_edit(
             cb,
             "➖ **Remove Sudo User**\n\n"
-            "Tap the button below and send the user ID or @username.",
-            reply_markup=_owner_action_keyboard("owner:remove_sudo"),
+            "Send the user ID or @username to revoke sudo access.",
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner remove sudo handler failed.")
@@ -1060,7 +1043,7 @@ async def _owner_add_prompt(client: Client, cb: types.CallbackQuery) -> None:
         await _safe_edit(
             cb,
             "🆔 **Send User ID or @username** to grant sudo access.",
-            reply_markup=_owner_panel_keyboard(),
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner add prompt handler failed.")
@@ -1077,7 +1060,7 @@ async def _owner_remove_prompt(client: Client, cb: types.CallbackQuery) -> None:
         await _safe_edit(
             cb,
             "🆔 **Send User ID or @username** to revoke sudo access.",
-            reply_markup=_owner_panel_keyboard(),
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner remove prompt handler failed.")
@@ -1096,7 +1079,7 @@ async def _owner_sudo_list(client: Client, cb: types.CallbackQuery) -> None:
         else:
             lines = "\n".join(f"• `{u['user_id']}`" for u in sudo_users)
             text = f"📄 **Sudo List**\n\n{lines}"
-        await _safe_edit(cb, text, reply_markup=_owner_panel_keyboard())
+        await _safe_edit(cb, text, reply_markup=_owner_control_panel_keyboard())
     except Exception:
         LOGGER.exception("Owner sudo list handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
@@ -1108,15 +1091,8 @@ async def _owner_manage_sessions(client: Client, cb: types.CallbackQuery) -> Non
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
         await _answer_cb(cb)
-        all_s = await get_active_sessions()
-        text = f"📑 **Active Sessions ({len(all_s)}):**\n\n"
-        kb = []
-        for s in all_s:
-            text += f"👤 {s['name']} ({s['phone']})\n"
-            callback_data = _build_remove_session_callback(s["phone"])
-            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
-        kb.append([types.InlineKeyboardButton("🔙 Back", callback_data=_cb("owner:panel"))])
-        await _safe_edit(cb, text, reply_markup=types.InlineKeyboardMarkup(kb))
+        text, markup = await _build_manage_sessions_view()
+        await _safe_edit(cb, text, reply_markup=markup)
     except Exception:
         LOGGER.exception("Owner manage sessions handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
@@ -1132,7 +1108,7 @@ async def _owner_set_log_cb(client: Client, cb: types.CallbackQuery) -> None:
         await _safe_edit(
             cb,
             "✅ This chat is now the **Log Group**.",
-            reply_markup=_owner_panel_keyboard(),
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner set log handler failed.")
@@ -1148,7 +1124,7 @@ async def _owner_set_session_cb(client: Client, cb: types.CallbackQuery) -> None
         await _safe_edit(
             cb,
             "⚠️ Use /set_session inside the session manager group to configure session intake.",
-            reply_markup=_owner_panel_keyboard(),
+            reply_markup=_owner_control_panel_keyboard(),
         )
     except Exception:
         LOGGER.exception("Owner set session handler failed.")
@@ -1184,7 +1160,7 @@ async def _help_manage_sessions(client: Client, cb: types.CallbackQuery) -> None
             text += f"👤 {s['name']} ({s['phone']})\n"
             callback_data = _build_remove_session_callback(s["phone"])
             kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
-        kb.append([types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))])
+        kb.append([types.InlineKeyboardButton("⬅️ Back", callback_data=_cb("back"))])
         await _safe_edit(cb, text, reply_markup=types.InlineKeyboardMarkup(kb))
     except Exception:
         LOGGER.exception("Help manage sessions failed.")
@@ -1223,16 +1199,8 @@ async def _manage_sessions(client: Client, message: types.Message) -> None:
         if not await _require_owner(message):
             return
         _log_command_invocation(message, "manage")
-        all_s = await get_active_sessions()
-        text = f"📑 **Active Sessions ({len(all_s)}):**\n\n"
-        kb = []
-        for s in all_s:
-            text += f"👤 {s['name']} ({s['phone']})\n"
-            callback_data = _build_remove_session_callback(s["phone"])
-            kb.append([types.InlineKeyboardButton(f"Remove {s['phone']}", callback_data=callback_data)])
-
-        kb.append([types.InlineKeyboardButton("🆘 Help", callback_data=_cb("home"))])
-        await _safe_reply(message, text, reply_markup=types.InlineKeyboardMarkup(kb))
+        text, markup = await _build_manage_sessions_view()
+        await _safe_reply(message, text, reply_markup=markup)
     except Exception:
         LOGGER.exception("Manage sessions command failed.")
         await _safe_reply(message, "❌ Failed to load sessions.")
@@ -1283,10 +1251,18 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
                 return
             if state == "owner_add_sudo":
                 await give_access(user_id, 24 * 365 * 10)
-                await _safe_reply(message, f"✅ Added `{user_id}` as sudo.", reply_markup=_owner_panel_keyboard())
+                await _safe_reply(
+                    message,
+                    f"✅ Added `{user_id}` as sudo.",
+                    reply_markup=_owner_control_panel_keyboard(),
+                )
             else:
                 await revoke_access(user_id)
-                await _safe_reply(message, f"✅ Removed `{user_id}` from sudo.", reply_markup=_owner_panel_keyboard())
+                await _safe_reply(
+                    message,
+                    f"✅ Removed `{user_id}` from sudo.",
+                    reply_markup=_owner_control_panel_keyboard(),
+                )
             _clear_love_state(message.from_user.id)
             return
         if state == "awaiting_target":
@@ -1295,6 +1271,7 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
                 await _safe_reply(message, "❌ You are not authorized. Send payment proof to get access.")
                 _clear_love_state(message.from_user.id)
                 return
+            has_sudo = True
             target_id, target_username = await _resolve_user_id(client, message.text)
             if target_id is None and target_username is None:
                 await _safe_reply(message, "❌ Failed to resolve user.")
@@ -1305,7 +1282,7 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
                 requester_id=message.from_user.id,
                 target_id=target_id,
                 target_username=target_username,
-                reply_markup=_sudo_panel_keyboard(),
+                reply_markup=_get_control_panel_keyboard(is_owner, has_sudo),
             )
             if queued:
                 _clear_love_state(message.from_user.id)
@@ -1333,18 +1310,22 @@ async def _add_session_from_string(message: types.Message, session_string: str) 
             await _safe_reply(
                 message,
                 "⚠️ Session validated but failed to save. The database may be down.",
-                reply_markup=_owner_panel_keyboard(),
+                reply_markup=_owner_control_panel_keyboard(),
             )
             return False
         await _safe_reply(
             message,
             f"✅ Session added for {me.first_name}.",
-            reply_markup=_owner_panel_keyboard(),
+            reply_markup=_owner_control_panel_keyboard(),
         )
         return True
     except Exception:
         LOGGER.exception("Add session from string failed.")
-        await _safe_reply(message, "❌ Failed to add session.", reply_markup=_owner_panel_keyboard())
+        await _safe_reply(
+            message,
+            "❌ Failed to add session.",
+            reply_markup=_owner_control_panel_keyboard(),
+        )
         return False
     finally:
         if started:
