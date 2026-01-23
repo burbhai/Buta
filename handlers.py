@@ -372,23 +372,26 @@ def _log_callback_invocation(cb: types.CallbackQuery) -> None:
 
 
 async def _resolve_user_id(client: Client, raw: str) -> Tuple[Optional[int], Optional[str]]:
-    raw = raw.strip().lstrip("@")
+    raw = raw.strip()
     if not raw:
         return None, None
+    normalized = raw.lstrip("@")
     if raw.isdigit():
         return int(raw), None
     try:
-        user = await client.get_users(raw)
-        return user.id, None
+        user = await client.get_users(normalized)
+        username = getattr(user, "username", None) or normalized
+        return user.id, username
     except FloodWait as e:
         await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
         try:
-            user = await client.get_users(raw)
-            return user.id, None
+            user = await client.get_users(normalized)
+            username = getattr(user, "username", None) or normalized
+            return user.id, username
         except RPCError:
-            return None, raw
+            return None, normalized.lower()
     except RPCError:
-        return None, raw
+        return None, normalized.lower()
 
 
 # -----------------------------
