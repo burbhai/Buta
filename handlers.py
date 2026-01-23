@@ -593,12 +593,6 @@ async def _queue_preban_target(
         return False
     request_id = uuid.uuid4().hex
     event = register_request_event(request_id)
-    await ban_queue.put(
-        (
-            {"id": target_id, "username": target_username, "request_id": request_id},
-            requester_id,
-        )
-    )
     queued_label = target_id if target_id is not None else f"@{target_username}"
     reply = await _safe_reply_message(
         message,
@@ -606,6 +600,18 @@ async def _queue_preban_target(
         f"Target: `{queued_label}`\n"
         "We'll update this message until processing starts.",
         reply_markup=reply_markup,
+    )
+    await ban_queue.put(
+        (
+            {
+                "id": target_id,
+                "username": target_username,
+                "request_id": request_id,
+                "notify_chat_id": message.chat.id,
+                "notify_message_id": reply.id if reply else None,
+            },
+            requester_id,
+        )
     )
     if reply:
         asyncio.create_task(
