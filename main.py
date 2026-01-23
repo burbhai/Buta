@@ -12,6 +12,7 @@ configure_logging()
 from bot_instance import get_bot
 from config import Config
 from core import ban_queue, start_preban_workers
+from core_fixes import patch_pyrogram_peer_type
 from db import check_db_health, ensure_indexes, get_active_sessions
 from handlers import register_fallbacks, register_ui_and_commands
 from payment_handler import register_payment
@@ -66,6 +67,8 @@ async def main() -> None:
     """Main async entrypoint for the bot."""
     Config.validate()
     LOGGER.info("Config validation completed.")
+    patch_pyrogram_peer_type()
+    LOGGER.info("Patched Pyrogram peer type detection.")
     LOGGER.info("Initializing database connection.")
     await _wait_for_db_ready()
     await ensure_indexes()

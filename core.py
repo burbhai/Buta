@@ -22,6 +22,7 @@ from pyrogram.raw import functions, types
 from db import get_active_sessions, get_settings
 from queue_handler import mark_task_completed, mark_task_started, signal_request_started
 from config import Config
+from core_fixes import safe_send_message
 
 LOGGER = logging.getLogger(__name__)
 
@@ -520,10 +521,9 @@ def _can_restrict(me_member: Any) -> bool:
 
 async def _safe_send(bot: Client, chat_id: int, text: str) -> None:
     """Safely send a message to a chat."""
-    try:
-        await bot.send_message(chat_id, text)
-    except Exception:
-        LOGGER.exception("Failed to send message to chat_id=%s.", chat_id)
+    sent = await safe_send_message(bot, chat_id, text)
+    if not sent:
+        LOGGER.warning("Failed to send message to chat_id=%s.", chat_id)
 
 
 async def _safe_edit_message(bot: Client, chat_id: int, message_id: int, text: str) -> bool:

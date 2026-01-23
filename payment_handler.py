@@ -8,6 +8,7 @@ from pyrogram.errors import ChatWriteForbidden, PeerIdInvalid, RPCError
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 
 from config import Config
+from core_fixes import safe_send_message
 from db import (
     get_payment_request,
     get_settings,
@@ -69,10 +70,9 @@ async def _answer_cb(
 
 
 async def _safe_send(client: Client, chat_id: int, text: str) -> None:
-    try:
-        await client.send_message(chat_id, text)
-    except Exception:
-        LOGGER.exception("Failed to send message to chat_id=%s.", chat_id)
+    sent = await safe_send_message(client, chat_id, text)
+    if not sent:
+        LOGGER.warning("Failed to send message to chat_id=%s.", chat_id)
 
 
 def _build_approval_keyboard(user_id: int, durations: list[int]) -> types.InlineKeyboardMarkup:

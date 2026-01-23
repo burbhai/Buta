@@ -71,6 +71,29 @@ class InMemoryCollection:
                 payload.setdefault(key, value)
             self._docs.append(payload)
 
+    async def find_one_and_update(
+        self,
+        query: Dict[str, Any],
+        update: Dict[str, Any],
+        upsert: bool = False,
+        return_document: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        for doc in self._docs:
+            if _match_query(doc, query):
+                doc.update(update.get("$set", {}))
+                return dict(doc)
+        if upsert:
+            payload = {}
+            for key, value in query.items():
+                if isinstance(value, dict) or key == "$or":
+                    continue
+                payload[key] = value
+            payload.update(update.get("$setOnInsert", {}))
+            payload.update(update.get("$set", {}))
+            self._docs.append(payload)
+            return dict(payload)
+        return None
+
 
 class InMemoryDB:
     """In-memory database fallback used when MongoDB is not configured."""
@@ -153,6 +176,8 @@ async def ensure_indexes() -> None:
         await _user_cache().create_index("username_norm")
         await _user_cache().create_index("user_id")
         await _users().create_index("expiry", expireAfterSeconds=0)
+        await _users().create_index("user_key", unique=True)
+        await _users().create_index("ban.prebanned")
     except IndexOptionsConflict:
         LOGGER.warning("MongoDB index options conflict; continuing without changes.")
     except Exception:

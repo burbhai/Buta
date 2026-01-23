@@ -25,6 +25,7 @@ from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 
 from config import Config
 from core import ban_queue, get_worker_status, parse_target_identifier
+from core_fixes import UserStore
 from db import (
     add_session,
     check_db_health,
@@ -40,6 +41,7 @@ from db import (
 from queue_handler import get_queue_snapshot, get_queue_status, register_request_event
 
 LOGGER = logging.getLogger(__name__)
+USER_STORE = UserStore()
 
 COMMANDS = [
     "start",
@@ -739,6 +741,19 @@ async def _queue_preban_target(
     request_id = uuid.uuid4().hex
     event = register_request_event(request_id)
     queued_label = target_id if target_id is not None else f"@{target_username}"
+    if target_id is not None or target_username:
+        try:
+            await USER_STORE.preban_user(
+                target_id if target_id is not None else target_username,
+                {
+                    "preban_reason": "queued preban request",
+                    "preban_by": requester_id,
+                    "preban_until": None,
+                    "preban_meta": {"request_id": request_id},
+                },
+            )
+        except Exception:
+            LOGGER.exception("Failed to record preban metadata.")
     reply = await _safe_reply_message(
         message,
         "🕒 **Pre-ban queued**\n\n"
