@@ -477,6 +477,13 @@ def _dm_only_message() -> str:
     return "⚠️ This feature is available in private chat. Please DM the bot."
 
 
+def _callback_private_filter(_: Client, cb: types.CallbackQuery) -> bool:
+    return bool(cb.message and cb.message.chat and cb.message.chat.type == enums.ChatType.PRIVATE)
+
+
+PRIVATE_CALLBACK_FILTER = filters.create(_callback_private_filter)
+
+
 def _get_control_panel_keyboard(is_owner: bool, has_sudo: bool) -> types.InlineKeyboardMarkup:
     if is_owner:
         return _owner_control_panel_keyboard()
@@ -765,44 +772,44 @@ def register_ui_and_commands(app: Client) -> None:
     )
 
     app.add_handler(
-        CallbackQueryHandler(_help_callback, filters.regex(r"^buta:help$") & filters.private),
+        CallbackQueryHandler(_help_callback, filters.regex(r"^buta:help$") & PRIVATE_CALLBACK_FILTER),
         group=3,
     )
     app.add_handler(
-        CallbackQueryHandler(_back_to_panel, filters.regex(r"^buta:back$") & filters.private),
-        group=3,
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(_payment_info, filters.regex(r"^buta:payment:info$") & filters.private),
-        group=3,
-    )
-    app.add_handler(
-        CallbackQueryHandler(_payment_how, filters.regex(r"^buta:payment:how$") & filters.private),
+        CallbackQueryHandler(_back_to_panel, filters.regex(r"^buta:back$") & PRIVATE_CALLBACK_FILTER),
         group=3,
     )
 
     app.add_handler(
-        CallbackQueryHandler(_love_send, filters.regex(r"^buta:love:send$") & filters.private),
+        CallbackQueryHandler(_payment_info, filters.regex(r"^buta:payment:info$") & PRIVATE_CALLBACK_FILTER),
+        group=3,
+    )
+    app.add_handler(
+        CallbackQueryHandler(_payment_how, filters.regex(r"^buta:payment:how$") & PRIVATE_CALLBACK_FILTER),
         group=3,
     )
 
     app.add_handler(
-        CallbackQueryHandler(_owner_add_sudo, filters.regex(r"^buta:owner:add_sudo$") & filters.private),
+        CallbackQueryHandler(_love_send, filters.regex(r"^buta:love:send$") & PRIVATE_CALLBACK_FILTER),
+        group=3,
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(_owner_add_sudo, filters.regex(r"^buta:owner:add_sudo$") & PRIVATE_CALLBACK_FILTER),
         group=3,
     )
     app.add_handler(
         CallbackQueryHandler(
-            _owner_manage_sessions, filters.regex(r"^buta:owner:manage_sessions$") & filters.private
+            _owner_manage_sessions, filters.regex(r"^buta:owner:manage_sessions$") & PRIVATE_CALLBACK_FILTER
         ),
         group=3,
     )
     app.add_handler(
-        CallbackQueryHandler(_owner_set_log_cb, filters.regex(r"^buta:owner:set_log$") & filters.private),
+        CallbackQueryHandler(_owner_set_log_cb, filters.regex(r"^buta:owner:set_log$") & PRIVATE_CALLBACK_FILTER),
         group=3,
     )
     app.add_handler(
-        CallbackQueryHandler(_owner_set_session_cb, filters.regex(r"^buta:owner:set_session$") & filters.private),
+        CallbackQueryHandler(_owner_set_session_cb, filters.regex(r"^buta:owner:set_session$") & PRIVATE_CALLBACK_FILTER),
         group=3,
     )
 
