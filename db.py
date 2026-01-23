@@ -80,6 +80,7 @@ class InMemoryDB:
         self.sessions = InMemoryCollection()
         self.settings = InMemoryCollection()
         self.user_cache = InMemoryCollection()
+        self.payments = InMemoryCollection()
 
 
 def _match_query(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
@@ -141,6 +142,10 @@ def _user_cache():
     return _get_db().user_cache
 
 
+def _payments():
+    return _get_db().payments
+
+
 async def ensure_indexes() -> None:
     """Ensure MongoDB indexes needed for bot queries."""
     try:
@@ -197,7 +202,13 @@ async def deactivate_session(phone: str) -> None:
 
 async def give_access(user_id: int, hours: int) -> None:
     """Grant sudo access for a number of hours."""
-    expiry = datetime.utcnow() + timedelta(hours=hours)
+    now = datetime.utcnow()
+    existing = await _users().find_one({"user_id": user_id}) or {}
+    current_expiry = existing.get("expiry")
+    if current_expiry and isinstance(current_expiry, datetime) and current_expiry > now:
+        expiry = current_expiry + timedelta(hours=hours)
+    else:
+        expiry = now + timedelta(hours=hours)
     await _users().update_one({"user_id": user_id}, {"$set": {"expiry": expiry}}, upsert=True)
 
 async def revoke_access(user_id: int) -> None:
@@ -231,6 +242,29 @@ async def has_access(user_id: int) -> bool:
         await _users().update_one({"user_id": user_id}, {"$set": {"expiry": datetime.utcnow()}}, upsert=True)
         return False
     return True
+
+
+async def record_payment_request(user_id: int, chat_id: int, message_id: int) -> None:
+    """Record a payment request by forwarded message id."""
+    await _payments().update_one(
+        {"message_id": message_id},
+        {"$set": {"user_id": user_id, "chat_id": chat_id, "status": "pending"}},
+        upsert=True,
+    )
+
+
+async def mark_payment_status(message_id: int, status: str, reviewed_by: int | None) -> None:
+    """Mark payment approval/rejection status."""
+    await _payments().update_one(
+        {"message_id": message_id},
+        {"$set": {"status": status, "reviewed_by": reviewed_by, "reviewed_at": datetime.utcnow()}},
+        upsert=True,
+    )
+
+
+async def get_payment_request(message_id: int) -> Optional[Dict[str, Any]]:
+    """Fetch a payment request by forwarded message id."""
+    return await _payments().find_one({"message_id": message_id})
 
 
 def _normalize_username(username: Optional[str]) -> Optional[str]:

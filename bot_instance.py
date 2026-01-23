@@ -29,6 +29,3 @@ def get_bot() -> Client:
             LOGGER.exception("Failed to initialize bot client. Check API_ID/API_HASH/BOT_TOKEN.")
             raise
     return _bot
-
-
-bot = get_bot()
