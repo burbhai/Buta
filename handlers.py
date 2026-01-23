@@ -455,11 +455,14 @@ def _owner_panel_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(
         [
             [
+                types.InlineKeyboardButton("➕ Add Session", callback_data=_cb("owner:add_session")),
+                types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send")),
+            ],
+            [
                 types.InlineKeyboardButton("➕ Add Sudo", callback_data=_cb("owner:add_sudo")),
                 types.InlineKeyboardButton("➖ Remove Sudo", callback_data=_cb("owner:remove_sudo")),
             ],
             [
-                types.InlineKeyboardButton("📄 Sudo List", callback_data=_cb("owner:sudo_list")),
                 types.InlineKeyboardButton(
                     "📥 Manage Sessions", callback_data=_cb("owner:manage_sessions")
                 ),
@@ -489,11 +492,15 @@ def _payment_keyboard() -> types.InlineKeyboardMarkup:
 
 
 def _owner_action_keyboard(action: str) -> types.InlineKeyboardMarkup:
+    if action == "owner:add_session":
+        label = "📥 Provide Session String"
+    else:
+        label = "🆔 Provide User ID/Username"
     return types.InlineKeyboardMarkup(
         [
             [
                 types.InlineKeyboardButton(
-                    "🆔 Provide User ID/Username", callback_data=_cb(f"{action}:prompt")
+                    label, callback_data=_cb(f"{action}:prompt")
                 )
             ],
             [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("owner:panel"))],
@@ -698,8 +705,10 @@ def register_ui_and_commands(app: Client) -> None:
     app.add_handler(CallbackQueryHandler(_love_send, filters.regex(r"^(?:buta:love:send|love_send)$") & filters.private), group=3)
 
     app.add_handler(CallbackQueryHandler(_owner_panel, filters.regex(r"^(?:buta:owner:panel|owner_panel)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_add_session, filters.regex(r"^(?:buta:owner:add_session|owner_add_session)$") & filters.private), group=3)
     app.add_handler(CallbackQueryHandler(_owner_add_sudo, filters.regex(r"^(?:buta:owner:add_sudo|owner_add_sudo)$") & filters.private), group=3)
     app.add_handler(CallbackQueryHandler(_owner_remove_sudo, filters.regex(r"^(?:buta:owner:remove_sudo|owner_remove_sudo)$") & filters.private), group=3)
+    app.add_handler(CallbackQueryHandler(_owner_add_session_prompt, filters.regex(r"^(?:buta:owner:add_session:prompt|owner_add_session_prompt)$") & filters.private), group=3)
     app.add_handler(CallbackQueryHandler(_owner_add_prompt, filters.regex(r"^(?:buta:owner:add_sudo:prompt|owner_add_sudo_prompt)$") & filters.private), group=3)
     app.add_handler(CallbackQueryHandler(_owner_remove_prompt, filters.regex(r"^(?:buta:owner:remove_sudo:prompt|owner_remove_sudo_prompt)$") & filters.private), group=3)
     app.add_handler(CallbackQueryHandler(_owner_sudo_list, filters.regex(r"^(?:buta:owner:sudo_list|owner_sudo_list)$") & filters.private), group=3)
@@ -970,6 +979,40 @@ async def _owner_panel(client: Client, cb: types.CallbackQuery) -> None:
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
 
 
+async def _owner_add_session(client: Client, cb: types.CallbackQuery) -> None:
+    try:
+        if not cb.from_user or cb.from_user.id not in Config.OWNERS:
+            await _answer_cb(cb, "Owner only.", show_alert=True)
+            return
+        await _answer_cb(cb)
+        await _safe_edit(
+            cb,
+            "➕ **Add Session**\n\n"
+            "Tap the button below and send the new session string.",
+            reply_markup=_owner_action_keyboard("owner:add_session"),
+        )
+    except Exception:
+        LOGGER.exception("Owner add session handler failed.")
+        await _safe_edit(cb, "❌ Something went wrong. Please try again.")
+
+
+async def _owner_add_session_prompt(client: Client, cb: types.CallbackQuery) -> None:
+    try:
+        if not cb.from_user or cb.from_user.id not in Config.OWNERS:
+            await _answer_cb(cb, "Owner only.", show_alert=True)
+            return
+        await _answer_cb(cb)
+        _set_love_state(cb.from_user.id, "owner_add_session")
+        await _safe_edit(
+            cb,
+            "🆔 **Send the session string** to add a new session.",
+            reply_markup=_owner_panel_keyboard(),
+        )
+    except Exception:
+        LOGGER.exception("Owner add session prompt failed.")
+        await _safe_edit(cb, "❌ Something went wrong. Please try again.")
+
+
 async def _owner_add_sudo(client: Client, cb: types.CallbackQuery) -> None:
     try:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
@@ -1214,6 +1257,17 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
         state = _get_love_state(message.from_user.id)
         if not state:
             return
+        if state == "owner_add_session":
+            if message.from_user.id not in Config.OWNERS:
+                return
+            session_string = message.text.strip()
+            if not session_string:
+                await _safe_reply(message, "❌ Please send a valid session string.")
+                return
+            success = await _add_session_from_string(message, session_string)
+            if success:
+                _clear_love_state(message.from_user.id)
+            return
         if state in {"owner_add_sudo", "owner_remove_sudo"}:
             if message.from_user.id not in Config.OWNERS:
                 return
@@ -1255,6 +1309,46 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
     except Exception:
         LOGGER.exception("Handle text handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
+
+
+async def _add_session_from_string(message: types.Message, session_string: str) -> bool:
+    temp = Client(
+        f"session_add_{uuid.uuid4().hex}",
+        session_string=session_string,
+        api_id=Config.API_ID,
+        api_hash=Config.API_HASH,
+    )
+    started = False
+    try:
+        await temp.start()
+        started = True
+        me = await temp.get_me()
+        try:
+            await add_session(session_string, me.first_name, me.phone_number or str(me.id))
+        except Exception:
+            LOGGER.exception("Failed to store session. The database may be unavailable.")
+            await _safe_reply(
+                message,
+                "⚠️ Session validated but failed to save. The database may be down.",
+                reply_markup=_owner_panel_keyboard(),
+            )
+            return False
+        await _safe_reply(
+            message,
+            f"✅ Session added for {me.first_name}.",
+            reply_markup=_owner_panel_keyboard(),
+        )
+        return True
+    except Exception:
+        LOGGER.exception("Add session from string failed.")
+        await _safe_reply(message, "❌ Failed to add session.", reply_markup=_owner_panel_keyboard())
+        return False
+    finally:
+        if started:
+            try:
+                await temp.stop()
+            except Exception:
+                LOGGER.exception("Failed to stop temporary session.")
 
 
 async def _preban_user(client: Client, message: types.Message) -> None:
@@ -1339,30 +1433,7 @@ async def _add_session_command(client: Client, message: types.Message) -> None:
             await _safe_reply(message, "Usage: /addsession <session_string>")
             return
         session_string = parts[1].strip()
-        temp = Client(
-            f"session_add_{uuid.uuid4().hex}",
-            session_string=session_string,
-            api_id=Config.API_ID,
-            api_hash=Config.API_HASH,
-        )
-        started = False
-        try:
-            await temp.start()
-            started = True
-            me = await temp.get_me()
-            try:
-                await add_session(session_string, me.first_name, me.phone_number or str(me.id))
-            except Exception:
-                LOGGER.exception("Failed to store session. The database may be unavailable.")
-                await _safe_reply(
-                    message,
-                    "⚠️ Session validated but failed to save. The database may be down.",
-                )
-                return
-            await _safe_reply(message, f"✅ Session added for {me.first_name}.")
-        finally:
-            if started:
-                await temp.stop()
+        await _add_session_from_string(message, session_string)
     except Exception:
         LOGGER.exception("Add session command failed.")
         await _safe_reply(message, "❌ Failed to add session.")
