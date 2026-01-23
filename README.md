@@ -38,6 +38,8 @@ QUEUE_MAXSIZE=0
 COMMAND_PREFIXES=/ ! .
 ALLOW_DEFAULTS=0
 ```
+Notes:
+- `SESSION_CONCURRENCY=0` runs all sessions in parallel for faster pre-ban execution.
 
 ### .env example
 ```
