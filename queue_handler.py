@@ -13,6 +13,7 @@ ACTIVE_TASKS = 0
 QUEUE_LENGTH = 0
 COMPLETED_TASKS: List[Tuple[str, float, bool]] = []
 MONITOR_TASK: Optional[asyncio.Task] = None
+REQUEST_EVENTS: dict[str, asyncio.Event] = {}
 
 
 async def _monitor_queue(queue: asyncio.Queue, interval: float) -> None:
@@ -34,6 +35,20 @@ def start_queue_monitor(queue: asyncio.Queue, *, interval: float = 2.0) -> async
         return MONITOR_TASK
     MONITOR_TASK = asyncio.create_task(_monitor_queue(queue, interval))
     return MONITOR_TASK
+
+
+def register_request_event(request_id: str) -> asyncio.Event:
+    """Register a queue wait event for a request id."""
+    event = asyncio.Event()
+    REQUEST_EVENTS[request_id] = event
+    return event
+
+
+def signal_request_started(request_id: str) -> None:
+    """Signal that a request has started processing."""
+    event = REQUEST_EVENTS.pop(request_id, None)
+    if event:
+        event.set()
 
 
 async def mark_task_started(label: str) -> None:

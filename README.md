@@ -77,7 +77,7 @@ python -m tools.selfcheck
 - `/addsession <session_string>`: Add a session directly (owner only).
 - `/addsudo <id|@username>`: Grant sudo access (owner only).
 - `/remsudo <id|@username>`: Revoke sudo access (owner only).
-- `/set <key> <value>`: Configure settings (owner only). Keys: `default_duration`, `approval_text`, `approval_durations`.
+- `/set <key> <value>`: Configure settings (owner only). Keys: `default_duration`, `approval_text`, `approval_durations`, `payment_rates`.
 - `/cancel`: Cancel Send Love state machine.
 
 ### Inline buttons (callback_data)
