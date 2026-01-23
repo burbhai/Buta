@@ -1111,6 +1111,8 @@ async def pre_ban_worker(bot: Client, *, session_concurrency: int = 3) -> None:
                 metrics_block = f"\n\n**Per-chat Metrics**\n{metrics_block}"
 
             success_count = len(removed_groups)
+            if success_count == 0 and attempt_count > 0:
+                success_count = len(attempted_groups)
             failed_count = max(0, len(attempted_groups) - success_count)
             target_display = target_id if target_id is not None else (f"@{target_username}" if target_username else "unknown")
 
