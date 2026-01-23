@@ -538,7 +538,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 continue
 
             # Metrics
-            success_count = 0
+            verified_count = 0
             attempt_count = 0
             ban_count = 0
             skip_count = 0
@@ -581,7 +581,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 attempt_count += a
                 ban_count += b
                 skip_count += s
-                success_count += v
+                verified_count += v
                 for cid, data in per_chat.items():
                     agg = chat_metrics.setdefault(
                         cid,
@@ -603,6 +603,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             if metrics_block:
                 metrics_block = f"\n\n**Per-chat Metrics**\n{metrics_block}"
 
+            success_count = verified_count if verify_enabled else ban_count
+            failed_count = max(0, attempt_count - success_count)
             if log_group:
                 await _safe_send(
                     bot,
@@ -612,8 +614,10 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     f"\nSessions Used: {session_count}"
                     f"\nAttempts: {attempt_count}"
                     f"\nBans Issued: {ban_count}"
+                    f"\nSuccess: {success_count}"
+                    f"\nFailed: {failed_count}"
                     f"\nSkipped: {skip_count}"
-                    f"\nVerified Bans: {success_count}"
+                    f"\nVerified Bans: {verified_count}"
                     f"\nBy: `{requester_id}`"
                     f"{metrics_block}",
                 )
@@ -625,10 +629,10 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 f"\nTarget: `{target_label}`"
                 f"\nSessions Used: {session_count}"
                 f"\nAttempts: {attempt_count}"
-                f"\nBans Issued: {ban_count}"
-                f"\nFailed: {max(0, attempt_count - ban_count)}"
+                f"\nSuccess: {success_count}"
+                f"\nFailed: {failed_count}"
                 f"\nSkipped: {skip_count}"
-                f"\nVerified Bans: {success_count}"
+                f"\nVerified Bans: {verified_count}"
                 f"{metrics_block}",
             )
             if notify_chat_id and notify_message_id:
@@ -640,10 +644,10 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     f"\nTarget: `{target_label}`"
                     f"\nSessions Used: {session_count}"
                     f"\nAttempts: {attempt_count}"
-                    f"\nSuccess: {ban_count}"
-                    f"\nFailed: {max(0, attempt_count - ban_count)}"
+                    f"\nSuccess: {success_count}"
+                    f"\nFailed: {failed_count}"
                     f"\nSkipped: {skip_count}"
-                    f"\nVerified Bans: {success_count}"
+                    f"\nVerified Bans: {verified_count}"
                     f"{metrics_block}",
                 )
             success = True
