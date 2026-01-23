@@ -7,7 +7,15 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, List, Set
 
 from pyrogram import Client, enums
-from pyrogram.errors import PeerIdInvalid, RPCError, FloodWait, UserNotParticipant
+from pyrogram.errors import (
+    ChatAdminRequired,
+    FloodWait,
+    PeerIdInvalid,
+    RPCError,
+    UserAdminInvalid,
+    UserIdInvalid,
+    UserNotParticipant,
+)
 
 from pyrogram.raw import functions, types
 
@@ -125,6 +133,16 @@ USER_CACHE = UserCache()
 # -----------------------------
 # Helpers
 # -----------------------------
+
+def normalize_username(username: Optional[str]) -> Optional[str]:
+    if not username:
+        return None
+    return str(username).lower().lstrip("@")
+
+
+def build_input_peer_user(user_id: int, access_hash: int) -> types.InputPeerUser:
+    return types.InputPeerUser(user_id=user_id, access_hash=access_hash)
+
 
 def add_fallback_entity(
     fallback_entities: List[Dict[str, Any]],
@@ -250,6 +268,48 @@ async def resolve_target_access_hash(
     return user_id, access_hash, uname
 
 
+async def resolve_target_globally(
+    sessions: List[Dict[str, Any]],
+    target_id: Optional[int],
+    target_username: Optional[str],
+) -> Tuple[Optional[int], Optional[int], Optional[str]]:
+    normalized_username = normalize_username(target_username)
+    cached = await USER_CACHE.get(user_id=target_id, username=normalized_username)
+    if cached and cached.user_id and cached.access_hash:
+        return cached.user_id, cached.access_hash, cached.username or normalized_username
+
+    for session_row in sessions:
+        agent = Client(
+            f"resolve_{session_row.get('id') or session_row.get('_id') or session_row.get('name') or uuid.uuid4().hex}",
+            session_string=session_row["string"],
+            api_id=Config.API_ID,
+            api_hash=Config.API_HASH,
+        )
+        try:
+            await agent.start()
+            resolved_id, access_hash, resolved_username = await ensure_entity_with_access_hash(
+                agent,
+                target_id,
+                normalized_username,
+            )
+            if resolved_id is not None and access_hash is not None:
+                await USER_CACHE.upsert(
+                    user_id=resolved_id,
+                    access_hash=access_hash,
+                    username=resolved_username or normalized_username,
+                )
+                return resolved_id, access_hash, resolved_username or normalized_username
+        except Exception:
+            continue
+        finally:
+            try:
+                await agent.stop()
+            except Exception:
+                pass
+
+    return None, None, normalized_username
+
+
 async def force_preban_raw(
     agent: Client,
     chat_id: int,
@@ -307,11 +367,8 @@ async def is_user_removed(
     target_username: Optional[str],
 ) -> bool:
     """Check if a user appears in the removed/banned list."""
-    if target_id is not None:
-        return await is_user_banned(agent, chat_id, target_id)
-
     if not target_username:
-        return False
+        return False if target_id is None else await is_user_banned(agent, chat_id, target_id)
 
     query = target_username.lstrip("@")
     try:
@@ -330,6 +387,20 @@ async def is_user_removed(
         await asyncio.sleep(int(getattr(e, "value", 1)) + 1)
     except RPCError:
         return False
+    return False
+
+
+async def verify_removed(
+    agent: Client,
+    chat_id: int,
+    target_username: Optional[str],
+    target_id: Optional[int],
+) -> bool:
+    normalized_username = normalize_username(target_username)
+    if normalized_username:
+        return await is_user_removed(agent, chat_id, None, normalized_username)
+    if target_id is not None:
+        return await is_user_banned(agent, chat_id, target_id)
     return False
 
 
@@ -377,10 +448,113 @@ async def _safe_edit_message(bot: Client, chat_id: int, message_id: int, text: s
         return False
 
 
+async def preban_in_group(
+    agent: Client,
+    dialog: Any,
+    target_peer: Optional[types.InputPeerUser],
+    *,
+    target_username: Optional[str],
+    target_id: Optional[int],
+    fallback_entities: List[Dict[str, Any]],
+    fallback_entity_ids: Set[int],
+    verify_enabled: bool,
+    verify_delay: float,
+) -> Tuple[int, int, int, int, int, Optional[Dict[str, Any]]]:
+    chat_id = dialog.chat.id
+    chat_title = getattr(dialog.chat, "title", None)
+    chat_data = {
+        "id": chat_id,
+        "title": chat_title,
+        "attempts": 0,
+        "bans": 0,
+        "skipped": 0,
+        "verified": 0,
+        "removed": 0,
+    }
+
+    try:
+        me_member = await with_floodwait(lambda: agent.get_chat_member(chat_id, "me"))
+    except Exception:
+        chat_data["skipped"] += 1
+        return 0, 0, 1, 0, 0, chat_data
+
+    if not _can_restrict(me_member):
+        chat_data["skipped"] += 1
+        return 0, 0, 1, 0, 0, chat_data
+
+    chat_data["attempts"] += 1
+    attempted = 1
+    banned = 0
+    verified = 0
+    removed = 0
+    resolved_id = target_peer.user_id if target_peer else target_id
+    resolved_access_hash = target_peer.access_hash if target_peer else None
+    resolved_username = normalize_username(target_username)
+
+    async def _attempt_ban(user_id: int, access_hash: Optional[int]) -> bool:
+        if user_id is None:
+            return False
+        if dialog.chat.type == "group":
+            await with_floodwait(lambda: agent.kick_chat_member(chat_id, user_id=user_id), max_retries=5)
+            return True
+        if access_hash is None:
+            return False
+        await force_preban_raw(agent, chat_id, user_id, access_hash, dialog.chat.type)
+        return True
+
+    try:
+        if target_peer:
+            await _attempt_ban(target_peer.user_id, target_peer.access_hash)
+            banned = 1
+            chat_data["bans"] += 1
+    except (ChatAdminRequired, UserAdminInvalid, UserIdInvalid, PeerIdInvalid, RPCError):
+        pass
+
+    if banned == 0:
+        try:
+            await collect_available_members(agent, chat_id, fallback_entities, fallback_entity_ids)
+            local_id, local_access_hash, local_username = await resolve_target_access_hash(
+                agent,
+                target_id,
+                resolved_username,
+                fallback_entities,
+                fallback_entity_ids,
+            )
+            if local_id is not None:
+                await _attempt_ban(local_id, local_access_hash)
+                banned = 1
+                chat_data["bans"] += 1
+                resolved_id = local_id
+                resolved_access_hash = local_access_hash
+                if local_username:
+                    resolved_username = normalize_username(local_username)
+        except (ChatAdminRequired, UserAdminInvalid, UserIdInvalid, PeerIdInvalid, RPCError):
+            pass
+
+    try:
+        if await verify_removed(agent, chat_id, resolved_username, resolved_id):
+            removed = 1
+            chat_data["removed"] += 1
+    except (FloodWait, RPCError):
+        pass
+
+    if verify_enabled and resolved_id is not None:
+        await asyncio.sleep(max(0.0, verify_delay))
+        try:
+            if await is_user_banned(agent, chat_id, resolved_id):
+                verified = 1
+                chat_data["verified"] += 1
+        except (FloodWait, RPCError):
+            pass
+
+    return attempted, banned, chat_data["skipped"], verified, removed, chat_data
+
+
 async def _process_one_session(
     session_row: Dict[str, Any],
-    target_id: Optional[int],
     target_username: Optional[str],
+    target_identity: Optional[Tuple[int, int]],
+    target_id: Optional[int],
     fallback_entities: List[Dict[str, Any]],
     fallback_entity_ids: Set[int],
     verify_enabled: bool,
@@ -405,118 +579,77 @@ async def _process_one_session(
 
     try:
         await agent.start()
-
-        resolved_id, access_hash, resolved_username = await resolve_target_access_hash(
-            agent,
-            target_id,
-            target_username,
-            fallback_entities,
-            fallback_entity_ids,
-        )
+        group_concurrency = max(1, int(getattr(Config, "GROUP_CONCURRENCY", 5)))
+        group_sem = asyncio.Semaphore(group_concurrency)
+        dialogs: List[Any] = []
 
         async for dialog in agent.get_dialogs():
-            if dialog.chat.type not in ["group", "supergroup"]:
-                if dialog.chat.type == "channel":
-                    chat_data = chat_metrics.setdefault(
-                        dialog.chat.id,
-                        {
-                            "title": getattr(dialog.chat, "title", None),
-                            "attempts": 0,
-                            "bans": 0,
-                            "skipped": 0,
-                            "verified": 0,
-                            "removed": 0,
-                        },
-                    )
-                    chat_data["skipped"] += 1
-                    skipped += 1
-                continue
-
-            try:
-                me_member = await with_floodwait(lambda: agent.get_chat_member(dialog.chat.id, "me"))
-            except Exception:
-                skipped += 1
-                continue
-
-            chat_data = chat_metrics.setdefault(
-                dialog.chat.id,
-                {
-                    "title": getattr(dialog.chat, "title", None),
-                    "attempts": 0,
-                    "bans": 0,
-                    "skipped": 0,
-                    "verified": 0,
-                    "removed": 0,
-                },
-            )
-
-            if not _can_restrict(me_member):
+            if dialog.chat.type in ["group", "supergroup"]:
+                dialogs.append(dialog)
+            elif dialog.chat.type == "channel":
+                chat_data = chat_metrics.setdefault(
+                    dialog.chat.id,
+                    {
+                        "title": getattr(dialog.chat, "title", None),
+                        "attempts": 0,
+                        "bans": 0,
+                        "skipped": 0,
+                        "verified": 0,
+                        "removed": 0,
+                    },
+                )
                 chat_data["skipped"] += 1
                 skipped += 1
+
+        target_peer = None
+        if target_identity and target_identity[0] and target_identity[1]:
+            target_peer = build_input_peer_user(target_identity[0], target_identity[1])
+
+        async def run_dialog(dialog: Any):
+            async with group_sem:
+                return await preban_in_group(
+                    agent,
+                    dialog,
+                    target_peer,
+                    target_username=target_username,
+                    target_id=target_id,
+                    fallback_entities=fallback_entities,
+                    fallback_entity_ids=fallback_entity_ids,
+                    verify_enabled=verify_enabled,
+                    verify_delay=verify_delay,
+                )
+
+        results = await asyncio.gather(
+            *[asyncio.create_task(run_dialog(dialog)) for dialog in dialogs],
+            return_exceptions=True,
+        )
+
+        for result in results:
+            if isinstance(result, Exception):
                 continue
-
-            attempts += 1
-            chat_data["attempts"] += 1
-
-            if resolved_id is None or access_hash is None:
-                await collect_available_members(agent, dialog.chat.id, fallback_entities, fallback_entity_ids)
-                resolved_id, access_hash, resolved_username = await resolve_target_access_hash(
-                    agent,
-                    target_id,
-                    target_username,
-                    fallback_entities,
-                    fallback_entity_ids,
+            a, b, s, v, r, chat_data = result
+            attempts += a
+            bans += b
+            skipped += s
+            verified += v
+            removed += r
+            if chat_data:
+                existing = chat_metrics.setdefault(
+                    chat_data["id"],
+                    {
+                        "title": chat_data.get("title"),
+                        "attempts": 0,
+                        "bans": 0,
+                        "skipped": 0,
+                        "verified": 0,
+                        "removed": 0,
+                    },
                 )
-                if resolved_id is None or access_hash is None:
-                    continue
-
-            # Pre-ban RAW for supergroups, fallback to kick for basic groups
-            try:
-                await force_preban_raw(
-                    agent,
-                    dialog.chat.id,
-                    resolved_id,
-                    access_hash,
-                    dialog.chat.type,
-                )
-                chat_data["bans"] += 1
-                bans += 1
-            except PeerIdInvalid:
-                # Warm-up and retry once
-                await collect_available_members(agent, dialog.chat.id, fallback_entities, fallback_entity_ids)
-                resolved_id, access_hash, resolved_username = await resolve_target_access_hash(
-                    agent,
-                    resolved_id,
-                    resolved_username,
-                    fallback_entities,
-                    fallback_entity_ids,
-                )
-                if resolved_id is None or access_hash is None:
-                    continue
-                try:
-                    await force_preban_raw(
-                        agent,
-                        dialog.chat.id,
-                        resolved_id,
-                        access_hash,
-                        dialog.chat.type,
-                    )
-                    chat_data["bans"] += 1
-                    bans += 1
-                except RPCError:
-                    continue
-            except RPCError:
-                continue
-
-            if await is_user_removed(agent, dialog.chat.id, resolved_id, resolved_username):
-                removed += 1
-                chat_data["removed"] += 1
-
-            if verify_enabled:
-                await asyncio.sleep(max(0.0, verify_delay))
-                if await is_user_banned(agent, dialog.chat.id, resolved_id):
-                    verified += 1
-                    chat_data["verified"] += 1
+                existing["attempts"] += chat_data.get("attempts", 0)
+                existing["bans"] += chat_data.get("bans", 0)
+                existing["skipped"] += chat_data.get("skipped", 0)
+                existing["verified"] += chat_data.get("verified", 0)
+                existing["removed"] += chat_data.get("removed", 0)
 
     finally:
         try:
@@ -525,6 +658,96 @@ async def _process_one_session(
             pass
 
     return attempts, bans, skipped, verified, removed, chat_metrics
+
+
+async def preban_all_sessions(
+    sessions: List[Dict[str, Any]],
+    *,
+    target_identity: Optional[Tuple[int, int]],
+    target_id: Optional[int],
+    target_username: Optional[str],
+    verify_enabled: bool,
+    verify_delay: float,
+    session_concurrency: int,
+) -> Tuple[int, int, int, int, int, int, Dict[int, Dict[str, Any]], Set[int], Set[int]]:
+    verified_count = 0
+    removed_count = 0
+    attempt_count = 0
+    ban_count = 0
+    skip_count = 0
+    session_count = 0
+    chat_metrics: Dict[int, Dict[str, Any]] = {}
+    attempted_groups: Set[int] = set()
+    confirmed_groups: Set[int] = set()
+
+    fallback_entities: List[Dict[str, Any]] = []
+    fallback_entity_ids: Set[int] = set()
+
+    sem = asyncio.Semaphore(max(1, int(session_concurrency)))
+
+    async def run_one(srow: Dict[str, Any]):
+        nonlocal session_count
+        async with sem:
+            session_count += 1
+            return await _process_one_session(
+                srow,
+                target_username,
+                target_identity,
+                target_id,
+                fallback_entities,
+                fallback_entity_ids,
+                verify_enabled,
+                verify_delay,
+            )
+
+    results = await asyncio.gather(
+        *[asyncio.create_task(run_one(s)) for s in sessions],
+        return_exceptions=True,
+    )
+
+    for r in results:
+        if isinstance(r, Exception):
+            LOGGER.exception("Pre-ban session failed.")
+            continue
+        a, b, s, v, removed, per_chat = r
+        attempt_count += a
+        ban_count += b
+        skip_count += s
+        verified_count += v
+        removed_count += removed
+        for cid, data in per_chat.items():
+            if data.get("attempts", 0) > 0:
+                attempted_groups.add(cid)
+            if data.get("removed", 0) > 0:
+                confirmed_groups.add(cid)
+            agg = chat_metrics.setdefault(
+                cid,
+                {
+                    "title": data.get("title"),
+                    "attempts": 0,
+                    "bans": 0,
+                    "skipped": 0,
+                    "verified": 0,
+                    "removed": 0,
+                },
+            )
+            agg["attempts"] += data.get("attempts", 0)
+            agg["bans"] += data.get("bans", 0)
+            agg["skipped"] += data.get("skipped", 0)
+            agg["verified"] += data.get("verified", 0)
+            agg["removed"] += data.get("removed", 0)
+
+    return (
+        session_count,
+        attempt_count,
+        ban_count,
+        skip_count,
+        verified_count,
+        removed_count,
+        chat_metrics,
+        attempted_groups,
+        confirmed_groups,
+    )
 
 
 async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
@@ -555,7 +778,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             target_username: Optional[str] = None
             if isinstance(target_info, dict):
                 target_id = target_info.get("id")
-                target_username = target_info.get("username")
+                target_username = normalize_username(target_info.get("username"))
             else:
                 target_id = target_info
 
@@ -578,87 +801,55 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     await _safe_send(bot, log_group, f"{msg}\nRequester: `{requester_id}`")
                 continue
 
-            # Metrics
-            verified_count = 0
-            removed_count = 0
-            attempt_count = 0
-            ban_count = 0
-            skip_count = 0
-            session_count = 0
-            chat_metrics: Dict[int, Dict[str, Any]] = {}
+            resolved_id, access_hash, resolved_username = await resolve_target_globally(
+                all_sessions,
+                target_id,
+                target_username,
+            )
+            if resolved_id is not None and access_hash is not None:
+                target_id = resolved_id
+                target_username = normalize_username(resolved_username) or target_username
+                target_identity = (resolved_id, access_hash)
+            else:
+                target_identity = None
 
-            # Fallback warm-up pool (shared across sessions of this request)
-            fallback_entities: List[Dict[str, Any]] = []
-            fallback_entity_ids: Set[int] = set()
-
-            # Run sessions in parallel (bounded)
-            effective_concurrency = max(1, int(session_concurrency), len(all_sessions))
-            sem = asyncio.Semaphore(effective_concurrency)
-
-            async def run_one(srow: Dict[str, Any]):
-                nonlocal session_count
-                async with sem:
-                    session_count += 1
-                    return await _process_one_session(
-                        srow,
-                        target_id,
-                        target_username,
-                        fallback_entities,
-                        fallback_entity_ids,
-                        verify_enabled,
-                        verify_delay,
-                    )
-
-            try:
-                tasks = [asyncio.create_task(run_one(s)) for s in all_sessions]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-            except Exception:
-                LOGGER.exception("Failed to run pre-ban tasks.")
-                results = []
-
-            for r in results:
-                if isinstance(r, Exception):
-                    LOGGER.exception("Pre-ban session failed.")
-                    continue
-                a, b, s, v, removed, per_chat = r
-                attempt_count += a
-                ban_count += b
-                skip_count += s
-                verified_count += v
-                removed_count += removed
-                for cid, data in per_chat.items():
-                    agg = chat_metrics.setdefault(
-                        cid,
-                        {
-                            "title": data.get("title"),
-                            "attempts": 0,
-                            "bans": 0,
-                            "skipped": 0,
-                            "verified": 0,
-                            "removed": 0,
-                        },
-                    )
-                    agg["attempts"] += data.get("attempts", 0)
-                    agg["bans"] += data.get("bans", 0)
-                    agg["skipped"] += data.get("skipped", 0)
-                    agg["verified"] += data.get("verified", 0)
-                    agg["removed"] += data.get("removed", 0)
+            (
+                session_count,
+                attempt_count,
+                ban_count,
+                skip_count,
+                verified_count,
+                removed_count,
+                chat_metrics,
+                attempted_groups,
+                confirmed_groups,
+            ) = await preban_all_sessions(
+                all_sessions,
+                target_identity=target_identity,
+                target_id=target_id,
+                target_username=target_username,
+                verify_enabled=verify_enabled,
+                verify_delay=verify_delay,
+                session_concurrency=session_concurrency,
+            )
 
             # Notify
             metrics_block = format_chat_metrics(chat_metrics)
             if metrics_block:
                 metrics_block = f"\n\n**Per-chat Metrics**\n{metrics_block}"
 
-            success_count = removed_count
-            failed_count = max(0, attempt_count - success_count)
+            success_count = len(confirmed_groups)
+            failed_count = max(0, len(attempted_groups) - success_count)
+            target_display = target_id if target_id is not None else (f"@{target_username}" if target_username else "unknown")
             if log_group:
                 await _safe_send(
                     bot,
                     log_group,
                     "🛡 **Pre-Ban Done**"
-                    f"\nTarget: `{target_label}`"
+                    f"\nTarget: `{target_display}`"
                     f"\nSessions Used: {session_count}"
                     f"\nAttempts: {attempt_count}"
+                    f"\nGroups Attempted: {len(attempted_groups)}"
                     f"\nBans Issued: {ban_count}"
                     f"\nSuccess: {success_count}"
                     f"\nFailed: {failed_count}"
@@ -672,15 +863,16 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             await _safe_send(
                 bot,
                 requester_id,
-                "✅ Pre-ban finished"
-                f"\nTarget: `{target_label}`"
+                "✅ Successful love request"
+                f"\nSuccessful Love Attempts: {success_count}"
+                f"\nGroups Attempted: {len(attempted_groups)}"
+                f"\nTarget: `{target_display}`"
                 f"\nSessions Used: {session_count}"
                 f"\nAttempts: {attempt_count}"
                 f"\nSuccess: {success_count}"
                 f"\nFailed: {failed_count}"
                 f"\nSkipped: {skip_count}"
                 f"\nVerified Bans: {verified_count}"
-                f"\nSuccessful Love Attempts: {success_count}"
                 f"{metrics_block}",
             )
             if notify_chat_id and notify_message_id:
@@ -688,15 +880,16 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                     bot,
                     notify_chat_id,
                     int(notify_message_id),
-                    "✅ **Send Love Complete**"
-                    f"\nTarget: `{target_label}`"
+                    "✅ **Successful love request**"
+                    f"\nSuccessful Love Attempts: {success_count}"
+                    f"\nGroups Attempted: {len(attempted_groups)}"
+                    f"\nTarget: `{target_display}`"
                     f"\nSessions Used: {session_count}"
                     f"\nAttempts: {attempt_count}"
                     f"\nSuccess: {success_count}"
                     f"\nFailed: {failed_count}"
                     f"\nSkipped: {skip_count}"
                     f"\nVerified Bans: {verified_count}"
-                    f"\nSuccessful Love Attempts: {success_count}"
                     f"{metrics_block}",
                 )
             success = True
