@@ -9,6 +9,8 @@ from __future__ import annotations
 #   buta:owner:manage_sessions, buta:owner:set_log, buta:owner:set_session,
 #   buta:payment:info, buta:payment:how, buta:session:remove:* (registered in
 #   register_ui_and_commands).
+# - Bugs fixed: private-chat detection (enums.ChatType.PRIVATE), callback mismatches,
+#   and shared command/callback flows for owner actions.
 
 import asyncio
 import logging
@@ -17,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from pyrogram import Client, StopPropagation, filters, types
+from pyrogram import Client, StopPropagation, enums, filters, types
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 
@@ -538,6 +540,104 @@ async def _build_manage_sessions_view() -> tuple[str, types.InlineKeyboardMarkup
     return text, types.InlineKeyboardMarkup(kb)
 
 
+async def _prompt_owner_add_sudo(
+    *,
+    message: Optional[types.Message] = None,
+    cb: Optional[types.CallbackQuery] = None,
+) -> None:
+    if cb and cb.from_user:
+        _set_love_state(cb.from_user.id, "owner_add_sudo")
+        await _answer_cb(cb)
+        await _safe_edit(
+            cb,
+            "➕ **Add Sudo User**\n\nSend the user ID or @username to grant sudo access.",
+            reply_markup=_owner_control_panel_keyboard(),
+        )
+        return
+    if message and message.from_user:
+        _set_love_state(message.from_user.id, "owner_add_sudo")
+        await _safe_reply(
+            message,
+            "➕ **Add Sudo User**\n\nSend the user ID or @username to grant sudo access.",
+            reply_markup=_owner_control_panel_keyboard(),
+        )
+
+
+async def _grant_sudo_access(
+    client: Client,
+    message: types.Message,
+    raw_target: str,
+    *,
+    reply_markup: Optional[types.InlineKeyboardMarkup] = None,
+) -> bool:
+    if not raw_target or not raw_target.strip():
+        await _safe_reply(message, "❌ Please send a valid user ID or @username.")
+        return False
+    user_id, username = await _resolve_user_id(client, raw_target)
+    if user_id is None:
+        await _safe_reply(message, f"❌ Failed to resolve {username or 'user'}.")
+        return False
+    await give_access(user_id, 24 * 365 * 10)
+    await _safe_reply(message, f"✅ Added `{user_id}` as sudo.", reply_markup=reply_markup)
+    return True
+
+
+async def _show_manage_sessions(
+    *,
+    message: Optional[types.Message] = None,
+    cb: Optional[types.CallbackQuery] = None,
+) -> None:
+    text, markup = await _build_manage_sessions_view()
+    if cb:
+        await _answer_cb(cb)
+        await _safe_edit(cb, text, reply_markup=markup)
+        return
+    if message:
+        await _safe_reply(message, text, reply_markup=markup)
+
+
+async def _apply_set_log_group(
+    chat_id: int,
+    *,
+    message: Optional[types.Message] = None,
+    cb: Optional[types.CallbackQuery] = None,
+) -> None:
+    await update_setting("log_group", chat_id)
+    text = "✅ This group is now the **Log Group**."
+    if cb:
+        await _answer_cb(cb)
+        await _safe_edit(cb, text, reply_markup=_owner_control_panel_keyboard())
+        return
+    if message:
+        await _safe_reply(message, text)
+
+
+async def _apply_set_session_group(
+    chat_id: int,
+    chat_type: enums.ChatType,
+    *,
+    message: Optional[types.Message] = None,
+    cb: Optional[types.CallbackQuery] = None,
+) -> None:
+    if chat_type not in {enums.ChatType.GROUP, enums.ChatType.SUPERGROUP}:
+        text = "⚠️ Use /set_session inside the session manager group."
+        if cb:
+            await _answer_cb(cb)
+            await _safe_edit(cb, text, reply_markup=_owner_control_panel_keyboard())
+            return
+        if message:
+            await _safe_reply(message, text)
+        return
+    await update_setting("session_group", chat_id)
+    text = "✅ This group is now the **Session Validation Group**."
+    if cb:
+        await _answer_cb(cb)
+        await _safe_edit(cb, text, reply_markup=_owner_control_panel_keyboard())
+        return
+    if message:
+        await _safe_reply(message, text)
+
+
 async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
     if not cb.from_user:
         return False
@@ -766,7 +866,7 @@ async def _help_command(client: Client, message: types.Message) -> None:
         _log_command_invocation(message, "help")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
-        show_keyboard = message.chat.type == "private"
+        show_keyboard = message.chat.type == enums.ChatType.PRIVATE
         if not has_sudo:
             payment_list = await _build_payment_list_text()
             text = (
@@ -792,7 +892,7 @@ async def _start_command(client: Client, message: types.Message) -> None:
         _log_command_invocation(message, "start")
         is_owner = message.from_user.id in Config.OWNERS
         has_sudo = is_owner or await has_access(message.from_user.id)
-        show_keyboard = message.chat.type == "private"
+        show_keyboard = message.chat.type == enums.ChatType.PRIVATE
         if not show_keyboard:
             await _safe_reply(message, "👋 **Welcome!**\n\nPlease DM me for full instructions.")
             return
@@ -1002,14 +1102,7 @@ async def _owner_add_sudo(client: Client, cb: types.CallbackQuery) -> None:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
-        await _answer_cb(cb)
-        _set_love_state(cb.from_user.id, "owner_add_sudo")
-        await _safe_edit(
-            cb,
-            "➕ **Add Sudo User**\n\n"
-            "Send the user ID or @username to grant sudo access.",
-            reply_markup=_owner_control_panel_keyboard(),
-        )
+        await _prompt_owner_add_sudo(cb=cb)
     except Exception:
         LOGGER.exception("Owner add sudo handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
@@ -1090,9 +1183,7 @@ async def _owner_manage_sessions(client: Client, cb: types.CallbackQuery) -> Non
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
-        await _answer_cb(cb)
-        text, markup = await _build_manage_sessions_view()
-        await _safe_edit(cb, text, reply_markup=markup)
+        await _show_manage_sessions(cb=cb)
     except Exception:
         LOGGER.exception("Owner manage sessions handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
@@ -1103,13 +1194,7 @@ async def _owner_set_log_cb(client: Client, cb: types.CallbackQuery) -> None:
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
-        await _answer_cb(cb)
-        await update_setting("log_group", cb.message.chat.id)
-        await _safe_edit(
-            cb,
-            "✅ This chat is now the **Log Group**.",
-            reply_markup=_owner_control_panel_keyboard(),
-        )
+        await _apply_set_log_group(cb.message.chat.id, cb=cb)
     except Exception:
         LOGGER.exception("Owner set log handler failed.")
         await _safe_edit(cb, "❌ Something went wrong. Please try again.")
@@ -1120,11 +1205,10 @@ async def _owner_set_session_cb(client: Client, cb: types.CallbackQuery) -> None
         if not cb.from_user or cb.from_user.id not in Config.OWNERS:
             await _answer_cb(cb, "Owner only.", show_alert=True)
             return
-        await _answer_cb(cb)
-        await _safe_edit(
-            cb,
-            "⚠️ Use /set_session inside the session manager group to configure session intake.",
-            reply_markup=_owner_control_panel_keyboard(),
+        await _apply_set_session_group(
+            cb.message.chat.id,
+            cb.message.chat.type,
+            cb=cb,
         )
     except Exception:
         LOGGER.exception("Owner set session handler failed.")
@@ -1172,8 +1256,7 @@ async def _set_log_group(client: Client, message: types.Message) -> None:
         if not await _require_owner(message):
             return
         _log_command_invocation(message, "set_log")
-        await update_setting("log_group", message.chat.id)
-        await _safe_reply(message, "✅ This group is now the **Log Group**.")
+        await _apply_set_log_group(message.chat.id, message=message)
     except Exception:
         LOGGER.exception("Set log command failed.")
         await _safe_reply(message, "❌ Failed to set log group.")
@@ -1184,11 +1267,7 @@ async def _set_session_group(client: Client, message: types.Message) -> None:
         if not await _require_owner(message):
             return
         _log_command_invocation(message, "set_session")
-        if message.chat.type not in {"group", "supergroup"}:
-            await _safe_reply(message, "⚠️ Use /set_session inside the session manager group.")
-            return
-        await update_setting("session_group", message.chat.id)
-        await _safe_reply(message, "✅ This group is now the **Session Validation Group**.")
+        await _apply_set_session_group(message.chat.id, message.chat.type, message=message)
     except Exception:
         LOGGER.exception("Set session command failed.")
         await _safe_reply(message, "❌ Failed to set session group.")
@@ -1199,8 +1278,7 @@ async def _manage_sessions(client: Client, message: types.Message) -> None:
         if not await _require_owner(message):
             return
         _log_command_invocation(message, "manage")
-        text, markup = await _build_manage_sessions_view()
-        await _safe_reply(message, text, reply_markup=markup)
+        await _show_manage_sessions(message=message)
     except Exception:
         LOGGER.exception("Manage sessions command failed.")
         await _safe_reply(message, "❌ Failed to load sessions.")
@@ -1242,21 +1320,22 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
         if state in {"owner_add_sudo", "owner_remove_sudo"}:
             if message.from_user.id not in Config.OWNERS:
                 return
-            user_id, username = await _resolve_user_id(client, message.text)
-            if user_id is None and username is None:
-                await _safe_reply(message, "❌ Please send a valid user ID or @username.")
-                return
-            if user_id is None and username is not None:
-                await _safe_reply(message, "❌ Unable to resolve that username.")
-                return
             if state == "owner_add_sudo":
-                await give_access(user_id, 24 * 365 * 10)
-                await _safe_reply(
+                if not await _grant_sudo_access(
+                    client,
                     message,
-                    f"✅ Added `{user_id}` as sudo.",
+                    message.text,
                     reply_markup=_owner_control_panel_keyboard(),
-                )
+                ):
+                    return
             else:
+                user_id, username = await _resolve_user_id(client, message.text)
+                if user_id is None and username is None:
+                    await _safe_reply(message, "❌ Please send a valid user ID or @username.")
+                    return
+                if user_id is None and username is not None:
+                    await _safe_reply(message, "❌ Unable to resolve that username.")
+                    return
                 await revoke_access(user_id)
                 await _safe_reply(
                     message,
@@ -1429,14 +1508,9 @@ async def _add_sudo_command(client: Client, message: types.Message) -> None:
             return
         _log_command_invocation(message, "addsudo")
         if len(message.command) < 2:
-            await _safe_reply(message, "Usage: /addsudo <user_id or @username>")
+            await _prompt_owner_add_sudo(message=message)
             return
-        user_id, username = await _resolve_user_id(client, message.command[1])
-        if user_id is None:
-            await _safe_reply(message, f"❌ Failed to resolve {username or 'user'}.")
-            return
-        await give_access(user_id, 24 * 365 * 10)
-        await _safe_reply(message, f"✅ Added `{user_id}` as sudo.")
+        await _grant_sudo_access(client, message, message.command[1])
     except Exception:
         LOGGER.exception("Add sudo command failed.")
         await _safe_reply(message, "❌ Failed to add sudo user.")
