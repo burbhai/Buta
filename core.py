@@ -15,6 +15,8 @@ from pyrogram.errors import (
     UserAdminInvalid,
     UserIdInvalid,
     UserNotParticipant,
+    UsernameInvalid,
+    UsernameNotOccupied,
 )
 
 from pyrogram.raw import functions, types
@@ -144,10 +146,71 @@ USER_CACHE = UserCache()
 # Helpers
 # -----------------------------
 
-def normalize_username(username: Optional[str]) -> Optional[str]:
-    if not username:
-        return None
-    return str(username).lower().lstrip("@")
+def normalize_username(username: str) -> str:
+    if username is None:
+        raise ValueError("username is required")
+    normalized = str(username).strip().lower()
+    if normalized.startswith("@"):
+        normalized = normalized[1:]
+    if not normalized:
+        raise ValueError("username is required")
+    return normalized
+
+
+class PrebanError(Exception):
+    pass
+
+
+async def resolve_public_username(app: Client, username: str) -> int:
+    try:
+        normalized = normalize_username(username)
+        user = await app.get_users(normalized)
+        user_id = int(getattr(user, "id", 0) or 0)
+        if user_id <= 0:
+            raise ValueError("resolved user id is invalid")
+        return user_id
+    except (UsernameInvalid, UsernameNotOccupied) as exc:
+        raise PrebanError("Username is invalid or not occupied.") from exc
+    except FloodWait as exc:
+        raise PrebanError("Too many requests. Please try again later.") from exc
+    except RPCError as exc:
+        raise PrebanError("Failed to resolve username due to API error.") from exc
+    except ValueError as exc:
+        raise PrebanError(str(exc)) from exc
+    except Exception as exc:
+        raise PrebanError("Failed to resolve username.") from exc
+
+
+async def preban_ban_now(app: Client, chat_id: int, username: str) -> Dict[str, Any]:
+    normalized = None
+    try:
+        normalized = normalize_username(username)
+        user_id = await resolve_public_username(app, normalized)
+        await app.ban_chat_member(chat_id, user_id)
+        return {
+            "ok": True,
+            "chat_id": int(chat_id),
+            "username": normalized,
+            "user_id": int(user_id),
+        }
+    except PrebanError as exc:
+        response = {
+            "ok": False,
+            "chat_id": int(chat_id),
+            "username": normalized or "",
+            "user_id": 0,
+            "error": str(exc),
+        }
+        return response
+    except (FloodWait, RPCError, ValueError) as exc:
+        response = {
+            "ok": False,
+            "chat_id": int(chat_id),
+            "username": normalized or "",
+            "user_id": 0,
+            "error": str(exc),
+        }
+        return response
 
 
 def parse_target_identifier(raw: str) -> Tuple[Optional[int], Optional[int], Optional[str]]:
@@ -327,7 +390,7 @@ async def resolve_target_globally(
     target_id: Optional[int],
     target_username: Optional[str],
 ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
-    normalized_username = normalize_username(target_username)
+    normalized_username = normalize_username(target_username) if target_username else None
     cached = await USER_CACHE.get(user_id=target_id, username=normalized_username)
     if cached and cached.user_id and cached.access_hash:
         return cached.user_id, cached.access_hash, cached.username or normalized_username
@@ -471,7 +534,7 @@ async def verify_removed(
     target_username: Optional[str],
     target_id: Optional[int],
 ) -> bool:
-    normalized_username = normalize_username(target_username)
+    normalized_username = normalize_username(target_username) if target_username else None
     if target_id is not None:
         return await is_user_removed(agent, chat_id, target_id, normalized_username)
     if normalized_username:
@@ -579,7 +642,7 @@ async def preban_in_group(
     removed = 0
     success = 0
     resolved_id = target_peer.user_id if target_peer else target_id
-    resolved_username = normalize_username(target_username)
+    resolved_username = normalize_username(target_username) if target_username else None
 
     async def _attempt_ban(user_id: Optional[int], access_hash: Optional[int]) -> BanAttemptResult:
         can_attempt, reason = can_attempt_preban(dialog.chat.type, user_id, access_hash)
@@ -639,7 +702,7 @@ async def preban_in_group(
                 resolved_id = local_id
                 resolved_access_hash = local_access_hash
                 if local_username:
-                    resolved_username = normalize_username(local_username)
+                    resolved_username = normalize_username(local_username) if local_username else None
             else:
                 chat_data["failure_reason"] = result.reason
 
@@ -906,7 +969,8 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
             target_access_hash: Optional[int] = None
             if isinstance(target_info, dict):
                 target_id = target_info.get("id")
-                target_username = normalize_username(target_info.get("username"))
+                raw_username = target_info.get("username")
+                target_username = normalize_username(raw_username) if raw_username else None
                 target_access_hash = target_info.get("access_hash")
             else:
                 target_id = target_info
@@ -941,7 +1005,7 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
                 )
                 if resolved_id is not None and access_hash is not None:
                     target_id = resolved_id
-                    target_username = normalize_username(resolved_username) or target_username
+                    target_username = normalize_username(resolved_username) if resolved_username else target_username
                     target_identity = (resolved_id, access_hash)
 
             (
