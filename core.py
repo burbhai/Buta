@@ -12,7 +12,7 @@ from pyrogram.errors import PeerIdInvalid, RPCError, FloodWait, UserNotParticipa
 from pyrogram.raw import functions, types
 
 from db import get_active_sessions, get_settings
-from queue_handler import mark_task_completed, mark_task_started
+from queue_handler import mark_task_completed, mark_task_started, signal_request_started
 from config import Config
 
 LOGGER = logging.getLogger(__name__)
@@ -490,6 +490,10 @@ async def pre_ban_worker(bot, *, session_concurrency: int = 3) -> None:
         try:
             target_info, requester_id = await ban_queue.get()
             got_item = True
+            if isinstance(target_info, dict):
+                request_id = target_info.get("request_id")
+                if request_id:
+                    signal_request_started(str(request_id))
 
             # Normalize target
             target_id: Optional[int] = None

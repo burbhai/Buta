@@ -19,12 +19,13 @@ from db import (
     deactivate_session,
     get_active_sessions,
     get_active_sudo_users,
+    get_settings,
     give_access,
     has_access,
     revoke_access,
     update_setting,
 )
-from queue_handler import get_queue_snapshot, get_queue_status
+from queue_handler import get_queue_snapshot, get_queue_status, register_request_event
 
 LOGGER = logging.getLogger(__name__)
 
@@ -150,6 +151,26 @@ async def _safe_reply(
             LOGGER.exception("Failed to send fallback reply.")
 
 
+async def _safe_reply_message(
+    message: types.Message,
+    text: str,
+    reply_markup: Optional[types.InlineKeyboardMarkup] = None,
+) -> Optional[types.Message]:
+    try:
+        reply = await message.reply(text, reply_markup=reply_markup)
+        setattr(message, "_buta_replied", True)
+        return reply
+    except Exception:
+        LOGGER.exception("Failed to reply to message.")
+        try:
+            reply = await message._client.send_message(message.chat.id, text, reply_markup=reply_markup)
+            setattr(message, "_buta_replied", True)
+            return reply
+        except Exception:
+            LOGGER.exception("Failed to send fallback reply.")
+            return None
+
+
 async def _safe_edit(
     cb: types.CallbackQuery,
     text: str,
@@ -182,6 +203,120 @@ async def _answer_cb(
             await cb.answer(text, show_alert=show_alert)
     except Exception:
         LOGGER.exception("Failed to answer callback query.")
+
+
+def _format_duration(hours: int) -> str:
+    if hours % 24 == 0:
+        days = hours // 24
+        return f"{days} day" if days == 1 else f"{days} days"
+    return f"{hours} hours"
+
+
+def _sanitize_durations(raw: object) -> list[int]:
+    defaults = [24, 72, 168]
+    if isinstance(raw, list):
+        durations = []
+        for item in raw:
+            try:
+                val = int(item)
+            except (TypeError, ValueError):
+                continue
+            if val > 0:
+                durations.append(val)
+        return durations or defaults
+    return defaults
+
+
+def _parse_payment_rates(raw: object) -> dict[int, str]:
+    rates: dict[int, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            try:
+                hours = int(key)
+            except (TypeError, ValueError):
+                continue
+            if value is None:
+                continue
+            rates[hours] = str(value)
+        return rates
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                hours = item.get("hours") or item.get("duration") or item.get("h")
+                price = item.get("price") or item.get("amount") or item.get("rate")
+                try:
+                    hours_int = int(hours)
+                except (TypeError, ValueError):
+                    continue
+                if price is not None:
+                    rates[hours_int] = str(price)
+            elif isinstance(item, str):
+                if ":" in item:
+                    hours_str, price = item.split(":", 1)
+                elif "=" in item:
+                    hours_str, price = item.split("=", 1)
+                else:
+                    continue
+                try:
+                    hours_int = int(hours_str.strip())
+                except ValueError:
+                    continue
+                rates[hours_int] = price.strip()
+    return rates
+
+
+async def _build_payment_list_text() -> str:
+    conf = await get_settings()
+    durations = _sanitize_durations(conf.get("approval_durations"))
+    rates = _parse_payment_rates(conf.get("payment_rates"))
+    default_rates = {24: "₹100", 72: "₹250", 168: "₹500"}
+    lines = []
+    for hours in durations:
+        price = rates.get(hours) or default_rates.get(hours) or "Contact admin"
+        lines.append(f"• {_format_duration(hours)} — **{price}**")
+    return "\n".join(lines)
+
+
+async def _start_queue_live_updates(
+    client: Client,
+    chat_id: int,
+    message_id: int,
+    request_id: str,
+    target_label: str,
+    event: Optional[asyncio.Event] = None,
+) -> None:
+    queue_event = event or register_request_event(request_id)
+    started_at = time.time()
+    last_text: Optional[str] = None
+    while True:
+        if queue_event.is_set():
+            text = (
+                "🚀 **Pre-ban started**\n"
+                f"Target: `{target_label}`\n\n"
+                "Live queue updates complete. You'll receive results once finished."
+            )
+            if text != last_text:
+                try:
+                    await client.edit_message_text(chat_id, message_id, text)
+                except Exception:
+                    LOGGER.exception("Failed to update queue start message.")
+            return
+        status_text = await get_queue_status()
+        text = (
+            "🕒 **Pre-ban queued**\n"
+            f"Target: `{target_label}`\n\n"
+            f"{status_text}\n\n"
+            "We'll keep updating this message until processing starts."
+        )
+        if text != last_text:
+            try:
+                await client.edit_message_text(chat_id, message_id, text)
+                last_text = text
+            except Exception:
+                LOGGER.exception("Failed to update queue status message.")
+        if time.time() - started_at > 300:
+            return
+        await asyncio.sleep(3)
 
 
 async def _reject_anonymous_command(message: types.Message) -> bool:
@@ -267,11 +402,23 @@ def _cb(action: str, *parts: str) -> str:
 
 
 def _start_keyboard(is_owner: bool, has_sudo: bool) -> types.InlineKeyboardMarkup:
+    if has_sudo and not is_owner:
+        return types.InlineKeyboardMarkup(
+            [[types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send"))]]
+        )
+    if not has_sudo and not is_owner:
+        return types.InlineKeyboardMarkup(
+            [
+                [types.InlineKeyboardButton("💳 Payment Plans", callback_data=_cb("payment:info"))],
+                [types.InlineKeyboardButton("📤 Send Payment Proof", callback_data=_cb("payment:how"))],
+                [types.InlineKeyboardButton("🧭 Guide", callback_data=_cb("start:help"))],
+            ]
+        )
     rows = [
         [
-            types.InlineKeyboardButton("❤️ Love", callback_data=_cb("love:send")),
-            types.InlineKeyboardButton("🆘 Help", callback_data=_cb("start:help")),
-            types.InlineKeyboardButton("🔁 Ping", callback_data=_cb("start:ping")),
+            types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send")),
+            types.InlineKeyboardButton("🧭 Guide", callback_data=_cb("start:help")),
+            types.InlineKeyboardButton("🔁 Status", callback_data=_cb("start:ping")),
         ]
     ]
     if is_owner:
@@ -292,10 +439,6 @@ def _start_keyboard(is_owner: bool, has_sudo: bool) -> types.InlineKeyboardMarku
                 ],
             ]
         )
-    elif not has_sudo:
-        rows.append(
-            [types.InlineKeyboardButton("💳 Payment Options", callback_data=_cb("payment:info"))]
-        )
     return types.InlineKeyboardMarkup(rows)
 
 
@@ -303,7 +446,7 @@ def _sudo_panel_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(
         [
             [types.InlineKeyboardButton("💌 Send Love", callback_data=_cb("love:send"))],
-            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))],
+            [types.InlineKeyboardButton("⬅️ Back", callback_data=_cb("home"))],
         ]
     )
 
@@ -337,10 +480,10 @@ def _payment_keyboard() -> types.InlineKeyboardMarkup:
         [
             [
                 types.InlineKeyboardButton(
-                    "📤 Send Payment Screenshot", callback_data=_cb("payment:how")
+                    "📤 Send Payment Proof", callback_data=_cb("payment:how")
                 )
             ],
-            [types.InlineKeyboardButton("🔙 Back", callback_data=_cb("home"))],
+            [types.InlineKeyboardButton("⬅️ Back", callback_data=_cb("home"))],
         ]
     )
 
@@ -433,6 +576,48 @@ async def _validate_single_session_for_preban(cb: types.CallbackQuery) -> bool:
             reply_markup=_start_keyboard(is_owner, has_sudo),
         )
         return False
+    return True
+
+
+async def _queue_preban_target(
+    client: Client,
+    message: types.Message,
+    *,
+    requester_id: int,
+    target_id: Optional[int],
+    target_username: Optional[str],
+    reply_markup: Optional[types.InlineKeyboardMarkup] = None,
+) -> bool:
+    if Config.QUEUE_MAXSIZE > 0 and ban_queue.full():
+        await _safe_reply(message, "⚠️ Queue is full. Please try again in a moment.")
+        return False
+    request_id = uuid.uuid4().hex
+    event = register_request_event(request_id)
+    await ban_queue.put(
+        (
+            {"id": target_id, "username": target_username, "request_id": request_id},
+            requester_id,
+        )
+    )
+    queued_label = target_id if target_id is not None else f"@{target_username}"
+    reply = await _safe_reply_message(
+        message,
+        "🕒 **Pre-ban queued**\n\n"
+        f"Target: `{queued_label}`\n"
+        "We'll update this message until processing starts.",
+        reply_markup=reply_markup,
+    )
+    if reply:
+        asyncio.create_task(
+            _start_queue_live_updates(
+                client,
+                message.chat.id,
+                reply.id,
+                request_id,
+                str(queued_label),
+                event,
+            )
+        )
     return True
 
 
@@ -594,11 +779,7 @@ async def _start_command(client: Client, message: types.Message) -> None:
         has_sudo = is_owner or await has_access(message.from_user.id)
         show_keyboard = message.chat.type == "private"
         if show_keyboard:
-            intro = (
-                "👋 **Welcome!**\n\n"
-                "Use /help to see available commands, or tap the buttons below.\n"
-                "To send a pre-ban request, use **Send Love** or /preban.\n"
-            )
+            intro = "👋 **Welcome!**\n\nUse the buttons below to continue.\n"
         else:
             intro = "👋 **Welcome!**\n\nPlease DM me for full instructions."
         if is_owner:
@@ -609,9 +790,11 @@ async def _start_command(client: Client, message: types.Message) -> None:
             body = "Tap **Send Love** to start a pre-ban request with a username."
         else:
             title = "💳 **Payment Required**"
+            payment_list = await _build_payment_list_text()
             body = (
-                "Please complete payment to activate **Send Love** access.\n"
-                "After payment, send a screenshot here for approval."
+                "Unlock **Send Love** access with a payment plan:\n\n"
+                f"{payment_list}\n\n"
+                "After payment, tap **Send Payment Proof** to upload your screenshot."
             )
         await _safe_reply(
             message,
@@ -631,7 +814,7 @@ async def _cancel_command(client: Client, message: types.Message) -> None:
         if not message.from_user:
             return
         _clear_love_state(message.from_user.id)
-        await _safe_reply(message, "✅ Cancelled. You can use /preban or Send Love again anytime.")
+        await _safe_reply(message, "✅ Cancelled. You can use **Send Love** again anytime.")
     except Exception:
         LOGGER.exception("Cancel command failed.")
         await _safe_reply(message, "❌ Failed to cancel. Please try again.")
@@ -685,9 +868,11 @@ async def _go_home(client: Client, cb: types.CallbackQuery) -> None:
             body = "Tap **Send Love** to start a pre-ban request with a username."
         else:
             title = "💳 **Payment Required**"
+            payment_list = await _build_payment_list_text()
             body = (
-                "Please complete payment to activate **Send Love** access.\n"
-                "After payment, send a screenshot here for approval."
+                "Unlock **Send Love** access with a payment plan:\n\n"
+                f"{payment_list}\n\n"
+                "After payment, tap **Send Payment Proof** to upload your screenshot."
             )
         await _safe_edit(
             cb,
@@ -702,11 +887,13 @@ async def _go_home(client: Client, cb: types.CallbackQuery) -> None:
 async def _payment_info(client: Client, cb: types.CallbackQuery) -> None:
     try:
         await _answer_cb(cb)
+        payment_list = await _build_payment_list_text()
         await _safe_edit(
             cb,
             "💳 **Payment to Send Love**\n\n"
+            f"{payment_list}\n\n"
             "Please complete payment and send your screenshot in this chat.\n"
-            "Our team will review and approve your access.",
+            "Tap **Send Payment Proof** after payment for approval.",
             reply_markup=_payment_keyboard(),
         )
     except Exception:
@@ -719,7 +906,7 @@ async def _payment_how(client: Client, cb: types.CallbackQuery) -> None:
         await _answer_cb(cb)
         await _safe_edit(
             cb,
-            "📤 **Send Payment Screenshot**\n\n"
+            "📤 **Send Payment Proof**\n\n"
             "Upload your payment proof image here. We'll verify and activate your access.",
             reply_markup=_payment_keyboard(),
         )
@@ -735,9 +922,11 @@ async def _love_send(client: Client, cb: types.CallbackQuery) -> None:
         is_owner = cb.from_user.id in Config.OWNERS
         if not is_owner and not await has_access(cb.from_user.id):
             await _answer_cb(cb, "Payment required to send love.", show_alert=True)
+            payment_list = await _build_payment_list_text()
             await _safe_edit(
                 cb,
                 "💳 **Payment Required**\n\n"
+                f"{payment_list}\n\n"
                 "Please complete payment to activate **Send Love** access.",
                 reply_markup=_payment_keyboard(),
             )
@@ -1047,20 +1236,16 @@ async def _handle_text_messages(client: Client, message: types.Message) -> None:
             if target_id is None and target_username is None:
                 await _safe_reply(message, "❌ Failed to resolve user.")
                 return
-            if Config.QUEUE_MAXSIZE > 0 and ban_queue.full():
-                await _safe_reply(message, "⚠️ Queue is full. Please try again in a moment.")
-                _clear_love_state(message.from_user.id)
-                return
-            await ban_queue.put(({"id": target_id, "username": target_username}, message.from_user.id))
-            queued_label = target_id if target_id is not None else f"@{target_username}"
-            await _safe_reply(
+            queued = await _queue_preban_target(
+                client,
                 message,
-                "🕒 **Love Sent to Queue**\n\n"
-                f"Target: `{queued_label}`\n"
-                "You'll receive results after processing.",
+                requester_id=message.from_user.id,
+                target_id=target_id,
+                target_username=target_username,
                 reply_markup=_sudo_panel_keyboard(),
             )
-            _clear_love_state(message.from_user.id)
+            if queued:
+                _clear_love_state(message.from_user.id)
     except Exception:
         LOGGER.exception("Handle text handler failed.")
         await _safe_reply(message, "❌ Something went wrong. Please try again.")
@@ -1086,13 +1271,13 @@ async def _preban_user(client: Client, message: types.Message) -> None:
             await _safe_reply(message, "❌ Failed to resolve user.")
             return
 
-        if Config.QUEUE_MAXSIZE > 0 and ban_queue.full():
-            await _safe_reply(message, "⚠️ Queue is full. Please try again in a moment.")
-            return
-
-        await ban_queue.put(({"id": target_id, "username": target_username}, message.from_user.id))
-        queued_label = target_id if target_id is not None else f"@{target_username}"
-        await _safe_reply(message, f"🕒 Added `{queued_label}` to pre-ban queue.")
+        await _queue_preban_target(
+            client,
+            message,
+            requester_id=message.from_user.id,
+            target_id=target_id,
+            target_username=target_username,
+        )
     except Exception:
         LOGGER.exception("Preban command failed.")
         await _safe_reply(message, "❌ Failed to queue pre-ban request.")
@@ -1268,7 +1453,8 @@ async def _set_command(client: Client, message: types.Message) -> None:
                 "Usage:\n"
                 "/set default_duration <hours>\n"
                 "/set approval_text <text>\n"
-                "/set approval_durations <comma-separated hours>",
+                "/set approval_durations <comma-separated hours>\n"
+                "/set payment_rates <hours:price, hours:price>",
             )
             return
         key = message.command[1].lower()
@@ -1295,6 +1481,29 @@ async def _set_command(client: Client, message: types.Message) -> None:
                 return
             await update_setting("approval_durations", durations)
             await _safe_reply(message, f"✅ Approval durations set to: {', '.join(map(str, durations))}h.")
+            return
+        if key == "payment_rates":
+            raw_pairs = [p.strip() for p in value.split(",") if p.strip()]
+            rates: dict[int, str] = {}
+            for pair in raw_pairs:
+                if ":" in pair:
+                    hours_str, price = pair.split(":", 1)
+                elif "=" in pair:
+                    hours_str, price = pair.split("=", 1)
+                else:
+                    await _safe_reply(message, "❌ payment_rates format: hours:price, hours:price")
+                    return
+                try:
+                    hours = int(hours_str.strip())
+                except ValueError:
+                    await _safe_reply(message, "❌ payment_rates hours must be integers.")
+                    return
+                if hours <= 0 or not price.strip():
+                    await _safe_reply(message, "❌ payment_rates entries must include hours and price.")
+                    return
+                rates[hours] = price.strip()
+            await update_setting("payment_rates", rates)
+            await _safe_reply(message, "✅ Payment rates updated.")
             return
         await _safe_reply(message, "❌ Unknown setting key. Use /set for usage.")
     except Exception:
